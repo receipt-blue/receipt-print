@@ -1,29 +1,31 @@
 # receipt-print
 
-A simple CLI tool for printing text on thermal receipt printers.
+A Unix-inspired CLI for printing content on thermal receipt printers.
 
 ## Installation
 
+A global installation is recommended, e.g. with [uv](https://docs.astral.sh/uv/):
 ```bash
-pip install receipt-print
+uv tool install receipt-print
 ```
 
 ## Usage
 
-Print piped text directly:
+Print piped text:
 ```bash
 echo "hello" | receipt-print
+cat file.txt | receipt-print
 ```
 
-Print the contents of files:
-```bash
-receipt-print cat file1.txt file2.txt
-```
-
-Print text directly:
+Print text:
 ```bash
 receipt-print echo "hello" "world"
 receipt-print echo -l "line 1" "line 2"  # use newlines instead of spaces
+```
+
+Print file content:
+```bash
+receipt-print cat file1.txt file2.txt
 ```
 
 Count how many lines would be printed:
@@ -34,7 +36,7 @@ man ls | receipt-print count
 
 ## Configuration
 
-Configure using environment variables ([see python-escpos documentation](https://readthedocs.org/projects/python-envconfig/en/latest/)):
+Configure using environment variables ([see python-escpos documentation](https://python-escpos.readthedocs.io/en/latest/user/usage.html)):
 
 - `RP_VENDOR`: USB vendor ID (default: 04b8)
 - `RP_PRODUCT`: USB product ID (default: 0e2a)
