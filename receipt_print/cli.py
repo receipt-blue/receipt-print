@@ -8,10 +8,11 @@ from escpos.exceptions import DeviceNotFoundError, USBNotFoundError
 from escpos.printer import Network, Usb
 
 # configuration
+NETWORK_HOST = os.getenv("RP_HOST")  # e.g. "192.168.1.100", optional
 VENDOR_HEX = os.getenv("RP_VENDOR", "04b8")
 PRODUCT_HEX = os.getenv("RP_PRODUCT", "0e2a")
 PRINTER_PROFILE = os.getenv("RP_PROFILE", "TM-T20II")
-PRINTER_HOST = os.getenv("RP_HOST")  # e.g. "192.168.1.100"
+CHARCODE = os.getenv("RP_CHARCODE", "CP437")
 CHAR_WIDTH = int(os.getenv("RP_CHAR_WIDTH", "72"))
 MAX_LINES = int(os.getenv("RP_MAX_LINES", "40"))
 
@@ -33,35 +34,49 @@ def count_lines(text, width):
 
 def connect_printer():
     """
-    Connect to the printer via USB. If that fails and PRINTER_HOST is set,
-    fall back to a network connection.
-    """
-    try:
-        if platform.system() == "Linux":
-            vendor_id = int(VENDOR_HEX, 16)
-            product_id = int(PRODUCT_HEX, 16)
-            printer = Usb(
-                idVendor=vendor_id, idProduct=product_id, profile=PRINTER_PROFILE
-            )
-        else:
-            from escpos import usb
+    Connect to the printer, prioritizing USB unless the environment variable
+    RP_NO_USB is set to 1, in which case skip USB entirely
+    and connect via the network if NETWORK_HOST is defined.
 
-            backend = usb.backend.libusb1.get_backend(
-                find_library=lambda x: "/opt/homebrew/lib/libusb-1.0.dylib"
-            )
-            printer = Usb(profile=PRINTER_PROFILE, backend=backend)
-        printer.open()
-        return printer
-    except (USBNotFoundError, DeviceNotFoundError) as e:
-        if PRINTER_HOST:
-            sys.stderr.write(
-                f"USB printer not found: {e}. Falling back to network printer at {PRINTER_HOST}.\n"
-            )
-            printer = Network(host=PRINTER_HOST, profile=PRINTER_PROFILE)
+    If a USB attempt fails, also try to connect via the network before exiting.
+    """
+    skip_usb = os.environ.get("RP_NO_USB", "0") == "1"
+
+    if not skip_usb:
+        try:
+            if platform.system() == "Linux":
+                vendor_id = int(VENDOR_HEX, 16)
+                product_id = int(PRODUCT_HEX, 16)
+                printer = Usb(
+                    idVendor=vendor_id, idProduct=product_id, profile=PRINTER_PROFILE
+                )
+            else:
+                from escpos import usb
+
+                backend = usb.backend.libusb1.get_backend(
+                    find_library=lambda x: "/opt/homebrew/lib/libusb-1.0.dylib"
+                )
+                printer = Usb(profile=PRINTER_PROFILE, backend=backend)
+
+            printer.open()
+            printer.charcode(CHARCODE)
             return printer
-        else:
-            sys.stderr.write(f"Error: USB printer not found: {e}\n")
-            sys.exit(1)
+
+        except (USBNotFoundError, DeviceNotFoundError, Exception):
+            sys.stderr.write(
+                "USB printer not found. Falling back to network printer.\n"
+            )
+
+    # fallback or direct network if RP_NO_USB
+    if not NETWORK_HOST:
+        sys.stderr.write(
+            "Error: No usable USB printer and NETWORK_HOST is not defined.\n"
+        )
+        sys.exit(1)
+
+    printer = Network(host=NETWORK_HOST, profile=PRINTER_PROFILE)
+    printer.charcode(CHARCODE)
+    return printer
 
 
 def print_text(text):
