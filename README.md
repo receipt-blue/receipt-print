@@ -34,6 +34,12 @@ receipt-print count file.txt
 man ls | receipt-print count
 ```
 
+Run command(s) and print captured output:
+```bash
+receipt-print shell "ls -l" "git status"
+receipt-print shell "hostname -I | awk '{print $1}'"
+```
+
 ## Configuration
 
 Configure using environment variables ([see python-escpos documentation](https://python-escpos.readthedocs.io/en/latest/user/usage.html)):
