@@ -5,6 +5,7 @@ description = "receipt printer CLI"
 authors = [
   { name = "jmpaz" }
 ]
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "python-escpos>=3.1",
