@@ -11,9 +11,24 @@ from escpos.printer import Network, Usb
 VENDOR_HEX = os.getenv("RP_VENDOR", "04b8")
 PRODUCT_HEX = os.getenv("RP_PRODUCT", "0e2a")
 PRINTER_PROFILE = os.getenv("RP_PROFILE", "TM-T20II")
-PRINTER_HOST = os.getenv(
-    "RP_HOST"
-)  # if USB connection fails, fall back to a network printer, e.g. "192.168.1.100"
+PRINTER_HOST = os.getenv("RP_HOST")  # e.g. "192.168.1.100"
+CHAR_WIDTH = int(os.getenv("RP_CHAR_WIDTH", "72"))
+MAX_LINES = int(os.getenv("RP_MAX_LINES", "40"))
+
+
+def count_lines(text, width):
+    """
+    Count the number of printed lines by wrapping each line at the given width.
+    Empty lines count as one printed line.
+    """
+    lines = text.splitlines()
+    total = 0
+    for line in lines:
+        if len(line) == 0:
+            total += 1
+        else:
+            total += (len(line) + width - 1) // width
+    return total
 
 
 def connect_printer():
@@ -53,7 +68,28 @@ def print_text(text):
     """
     Connects to the printer, applies a basic text style, prints the text,
     cuts the receipt, and then closes the connection.
+
+    If the text will print more than MAX_LINES, ask the user to confirm.
     """
+    line_count = count_lines(text, CHAR_WIDTH)
+
+    if line_count > MAX_LINES:
+        prompt = (
+            f"Warning: The text will resolve to {line_count} printed lines, which exceeds the limit of {MAX_LINES}.\n"
+            "Do you want to continue? [y/N] "
+        )
+        try:
+            with open("/dev/tty", "r") as tty:
+                sys.stdout.write(prompt)
+                sys.stdout.flush()
+                confirm = tty.readline().strip()
+        except Exception:
+            sys.stderr.write("No interactive input available. Aborting.\n")
+            sys.exit(1)
+
+        if confirm.lower() not in ("y", "yes"):
+            sys.exit(0)
+
     printer = connect_printer()
     printer.set(
         align="left",
@@ -84,45 +120,84 @@ def cat_files(files):
 
 
 def create_parser():
-    parser = argparse.ArgumentParser(description="Print text to a receipt printer.")
+    parser = argparse.ArgumentParser(
+        description="Print text to a receipt printer."
+        " If no subcommand is provided, piped input will be printed directly."
+    )
     subparsers = parser.add_subparsers(dest="command", help="Subcommands")
-    # 'cat' subcommand for printing file contents
-    cat_parser = subparsers.add_parser("cat", help="Print the contents of file(s)")
+
+    # echo
+    echo_parser = subparsers.add_parser(
+        "echo", help="Print direct text passed as arguments."
+    )
+    echo_parser.add_argument("text", nargs="+", help="Text to print.")
+    echo_parser.add_argument(
+        "-l",
+        "--lines",
+        action="store_true",
+        help="Join the input arguments with newlines instead of spaces.",
+    )
+
+    # cat
+    cat_parser = subparsers.add_parser("cat", help="Print the contents of file(s).")
     cat_parser.add_argument("files", nargs="+", help="File(s) to print")
+
+    # count
+    count_parser = subparsers.add_parser(
+        "count",
+        help="Calculate the number of lines that would be printed if running 'cat' on a given input.",
+    )
+    count_parser.add_argument(
+        "files",
+        nargs="*",
+        help="File(s) to count lines from. If omitted, piped input is used.",
+    )
+
     return parser
 
 
-def process_args(args):
-    if args.command == "cat":
+def main():
+    parser = create_parser()
+    args = parser.parse_args()
+
+    # if no subcommand is provided, check for piped input
+    if args.command is None:
+        if not sys.stdin.isatty():
+            piped_text = sys.stdin.read()
+            print_text(piped_text)
+        else:
+            parser.print_help()
+            sys.exit(1)
+    elif args.command == "echo":
+        if args.lines:
+            text = "\n".join(args.text)
+        else:
+            text = " ".join(args.text)
+        print_text(text)
+    elif args.command == "cat":
         cat_files(args.files)
+    elif args.command == "count":
+        if args.files:
+            combined_text = ""
+            for fname in args.files:
+                try:
+                    with open(fname, "r") as f:
+                        combined_text += f.read()
+                except Exception as e:
+                    sys.stderr.write(f"Error reading {fname}: {e}\n")
+                    sys.exit(1)
+        else:
+            if not sys.stdin.isatty():
+                combined_text = sys.stdin.read()
+            else:
+                sys.stderr.write(
+                    "No input provided for counting. Use files or pipe text.\n"
+                )
+                sys.exit(1)
+        print(count_lines(combined_text, CHAR_WIDTH))
     else:
-        # should not get here normally
         sys.stderr.write("Invalid command.\n")
         sys.exit(1)
-
-
-def main():
-    # if there's piped input *and* no extra args, use piped input
-    if not sys.stdin.isatty() and len(sys.argv) == 1:
-        piped_text = sys.stdin.read()
-        print_text(piped_text)
-        return
-
-    # if help is requested, let argparse show it
-    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
-        parser = create_parser()
-        parser.parse_args()  # this will print help and exit
-        return
-
-    # if the first argument is "cat", then we invoke the subcommand parser
-    if sys.argv[1] == "cat":
-        parser = create_parser()
-        args = parser.parse_args()
-        process_args(args)
-    else:
-        # assume all arguments are text to print
-        text = "\n".join(sys.argv[1:])
-        print_text(text)
 
 
 if __name__ == "__main__":
