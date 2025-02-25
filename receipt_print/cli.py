@@ -11,7 +11,6 @@ from escpos.printer import Network, Usb
 VENDOR_HEX = os.getenv("RP_VENDOR", "04b8")
 PRODUCT_HEX = os.getenv("RP_PRODUCT", "0e2a")
 PRINTER_PROFILE = os.getenv("RP_PROFILE", "TM-T20II")
-
 PRINTER_HOST = os.getenv(
     "RP_HOST"
 )  # if USB connection fails, fall back to a network printer, e.g. "192.168.1.100"
@@ -30,7 +29,6 @@ def connect_printer():
                 idVendor=vendor_id, idProduct=product_id, profile=PRINTER_PROFILE
             )
         else:
-            # macOS or other OSs requiring an explicit backend setup:
             from escpos import usb
 
             backend = usb.backend.libusb1.get_backend(
@@ -54,7 +52,7 @@ def connect_printer():
 def print_text(text):
     """
     Connects to the printer, applies a basic text style, prints the text,
-    adds some padding, and then closes the connection.
+    cuts the receipt, and then closes the connection.
     """
     printer = connect_printer()
     printer.set(
@@ -66,8 +64,6 @@ def print_text(text):
         invert=False,
     )
     printer.text(text)
-    # Add extra newlines for visual padding on the printed output:
-    # printer.ln(6)
     printer.cut()
     printer.close()
 
@@ -87,28 +83,46 @@ def cat_files(files):
     print_text(combined_text)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="rp - a physical cat. Pipe text to print, or use 'rp cat <file>' to print file contents."
-    )
-    subparsers = parser.add_subparsers(dest="command")
-
-    # 'cat' subcommand: read and print contents of file(s)
+def create_parser():
+    parser = argparse.ArgumentParser(description="Print text to a receipt printer.")
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
+    # 'cat' subcommand for printing file contents
     cat_parser = subparsers.add_parser("cat", help="Print the contents of file(s)")
     cat_parser.add_argument("files", nargs="+", help="File(s) to print")
+    return parser
 
-    args = parser.parse_args()
 
+def process_args(args):
     if args.command == "cat":
         cat_files(args.files)
     else:
-        # No subcommand provided: if text is piped in, print it
-        if not sys.stdin.isatty():
-            input_text = sys.stdin.read()
-            print_text(input_text)
-        else:
-            parser.print_help()
-            sys.exit(1)
+        # should not get here normally
+        sys.stderr.write("Invalid command.\n")
+        sys.exit(1)
+
+
+def main():
+    # if there's piped input *and* no extra args, use piped input
+    if not sys.stdin.isatty() and len(sys.argv) == 1:
+        piped_text = sys.stdin.read()
+        print_text(piped_text)
+        return
+
+    # if help is requested, let argparse show it
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        parser = create_parser()
+        parser.parse_args()  # this will print help and exit
+        return
+
+    # if the first argument is "cat", then we invoke the subcommand parser
+    if sys.argv[1] == "cat":
+        parser = create_parser()
+        args = parser.parse_args()
+        process_args(args)
+    else:
+        # assume all arguments are text to print
+        text = "\n".join(sys.argv[1:])
+        print_text(text)
 
 
 if __name__ == "__main__":
