@@ -183,24 +183,35 @@ def run_command_in_wrapped_tty(cmd: str, columns: int) -> str:
 
     output_chunks = []
     while True:
+        # check if process has ended
         if proc.poll() is not None:
+            # drain any remaining output
             while True:
                 rlist, _, _ = select.select([master_fd], [], [], 0)
                 if not rlist:
                     break
+                try:
+                    data = os.read(master_fd, 1024)
+                    if not data:
+                        break
+                    output_chunks.append(data.decode("utf-8", "replace"))
+                except OSError:
+                    break
+            break
+
+        # read available output
+        rlist, _, _ = select.select([master_fd], [], [], 0.1)
+        if master_fd in rlist:
+            try:
                 data = os.read(master_fd, 1024)
                 if not data:
                     break
                 output_chunks.append(data.decode("utf-8", "replace"))
-            break
-
-        rlist, _, _ = select.select([master_fd], [], [], 0.1)
-        if master_fd in rlist:
-            data = os.read(master_fd, 1024)
-            if not data:
+            except OSError:
                 break
-            output_chunks.append(data.decode("utf-8", "replace"))
 
+    # clean up
+    os.close(master_fd)
     try:
         os.close(slave_fd)
     except OSError:
