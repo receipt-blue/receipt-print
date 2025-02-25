@@ -13,7 +13,7 @@ VENDOR_HEX = os.getenv("RP_VENDOR", "04b8")
 PRODUCT_HEX = os.getenv("RP_PRODUCT", "0e2a")
 PRINTER_PROFILE = os.getenv("RP_PROFILE", "TM-T20II")
 CHARCODE = os.getenv("RP_CHARCODE", "CP437")
-CHAR_WIDTH = int(os.getenv("RP_CHAR_WIDTH", "72"))
+CHAR_WIDTH = int(os.getenv("RP_CHAR_WIDTH", "42"))
 MAX_LINES = int(os.getenv("RP_MAX_LINES", "40"))
 
 
