@@ -70,7 +70,8 @@ def connect_printer():
                     idVendor=vendor_id, idProduct=product_id, profile=PRINTER_PROFILE
                 )
             else:
-                from escpos import usb
+                import usb.backend.libusb1
+                import usb.core
 
                 backend = usb.backend.libusb1.get_backend(
                     find_library=lambda x: "/opt/homebrew/lib/libusb-1.0.dylib"
