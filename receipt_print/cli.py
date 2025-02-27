@@ -249,34 +249,28 @@ def run_shell_commands(commands, wrap_tty=True, columns=80):
     return "\n\n\n".join(pairs)
 
 
-def print_images(files, scale_list, align_list):
+def print_images(printer, files, scale_list, align_list, debug=False):
     """
     Load and print one or more images with optional scaling and alignment/orientation.
 
-    For each image:
-      - Check the user-specified alignment. If it is one of {"l-top", "l-bottom", "l-center"},
-        the image is rotated 90° clockwise (landscape).
-      - Otherwise, it remains in portrait.
-      - The image is scaled if the user-specified factor is != 1.0 or if it exceeds
-        the printer's maximum width from the profile.
-
+    :param printer: An already-connected escpos printer object.
     :param files: A list of image file paths.
     :param scale_list: A list of scale factors (floats). If there are fewer scale factors than images,
                        the last one is reused for subsequent images.
-    :param align_list: A list of alignment specifiers (strings). Similar reuse logic as scales.
-                       Valid values: left, right, center, p-center, l-top, l-bottom, l-center.
+    :param align_list: A list of alignment specifiers (strings). Valid: left, right, center, p-center, l-top, l-bottom, l-center.
+    :param debug: If True, print debug info (alignment, scale) above each image.
     """
     from PIL import Image
 
     resample = Image.Resampling.LANCZOS
 
-    printer = connect_printer()
-
-    # try to detect the maximum printable width from the printer profile
+    # determine maximum printable width from printer profile
     max_width = 576
     try:
-        prof = printer.profile.profile_data
-        max_width = int(prof["media"]["width"]["pixels"])
+        pconf = printer.profile.profile_data
+        w = pconf["media"]["width"]["pixels"]
+        if w != "Unknown":
+            max_width = int(w)
     except Exception:
         pass
 
@@ -289,73 +283,63 @@ def print_images(files, scale_list, align_list):
     expanded_aligns = [get_val(align_list, i).lower() for i in range(len(files))]
     expanded_scales = [float(get_val(scale_list, i)) for i in range(len(files))]
 
-    # if all images have the same alignment, we consider that "unified" orientation
-    # e.g. if they're all "l-top," we rotate all images to landscape, etc.
-    force_unified = len(set(expanded_aligns)) == 1
-
     def desired_orientation(align_val):
-        """
-        Return "landscape" if align_val is one of {"l-top","l-bottom","l-center"},
-        otherwise "portrait" for {"left","right","center","p-center"}.
-        """
         if align_val in {"l-top", "l-bottom", "l-center"}:
             return "landscape"
         return "portrait"
 
-    # if there is only one unique alignment, figure out orientation once.
+    force_unified = len(set(expanded_aligns)) == 1
     batch_orientation = (
         desired_orientation(expanded_aligns[0]) if force_unified else None
     )
 
     total_estimated_lines = 0
-    processed_images = []  # will store (image_obj, alignment_used, file_path)
+    processed_images = []  # will store (image_obj, alignment_used, scale_used, file_path)
 
     for i, file_path in enumerate(files):
         user_scale = expanded_scales[i]
         user_align = expanded_aligns[i]
-
-        # if we have a forced unified orientation, that means the alignment
-        # in practice is the same for all images, so unify it explicitly.
         if batch_orientation is not None:
             user_align = expanded_aligns[0]
-
         orientation = (
             batch_orientation
             if batch_orientation is not None
             else desired_orientation(user_align)
         )
 
-        # open the image
         try:
             img = Image.open(file_path)
+            img.load()
         except Exception as e:
             sys.stderr.write(f"Warning: could not open {file_path}: {e}\n")
-            processed_images.append((None, user_align, file_path))
+            processed_images.append((None, user_align, user_scale, file_path))
             continue
 
-        # apply user scale
-        if user_scale != 1.0:
-            new_w = int(img.width * user_scale)
-            new_h = int(img.height * user_scale)
-            img = img.resize((new_w, new_h), resample)
-
-        # if orientation is landscape, rotate 90° clockwise
+        # rotate if landscape
         if orientation == "landscape":
             img = img.rotate(270, expand=True)
 
-        # if the image is still too wide for the printer, scale it down
+        # force-fit image to printer's max width if necessary
         if img.width > max_width:
-            ratio = max_width / img.width
-            img = img.resize((max_width, int(img.height * ratio)), resample)
+            force_ratio = max_width / img.width
+            new_w = int(img.width * force_ratio)
+            new_h = int(img.height * force_ratio)
+            img = img.resize((new_w, new_h), resample)
+
+        # apply user scale relative to forced size
+        if not math.isclose(user_scale, 1.0, rel_tol=1e-5):
+            scaled_w = int(img.width * user_scale)
+            scaled_h = int(img.height * user_scale)
+            img = img.resize((scaled_w, scaled_h), resample)
 
         lines_estimate = math.ceil(img.height / DOTS_PER_LINE)
         total_estimated_lines += lines_estimate
 
-        processed_images.append((img, user_align, file_path))
+        processed_images.append((img, user_align, user_scale, file_path))
 
     if total_estimated_lines > MAX_LINES:
         prompt = (
-            f"Warning: Image(s) estimated to use about {total_estimated_lines} lines, "
+            f"Warning: Image(s) will print approximately {total_estimated_lines} lines, "
             f"which exceeds the limit of {MAX_LINES}.\n"
             "Do you want to continue? [y/N] "
         )
@@ -366,68 +350,55 @@ def print_images(files, scale_list, align_list):
                 confirm = tty.readline().strip()
         except Exception:
             sys.stderr.write("No interactive input available. Aborting.\n")
-            printer.close()
             sys.exit(1)
 
         if confirm.lower() not in ("y", "yes"):
-            printer.close()
             sys.exit(0)
 
-    # helper function to set alignment commands for the printer
-    def apply_alignment(alignment, orient):
+    printer.set(
+        font="a", bold=False, double_height=False, double_width=False, invert=False
+    )
+
+    def apply_alignment(alignment: str, orient: str):
         """
-        Return (align_command, center_flag) for the printer based on orientation.
+        Return (escpos_align, center_flag) based on alignment and orientation.
         """
-        if orient == "portrait":
-            if alignment in {"left", "l-top"}:
-                return ("left", False)
-            if alignment in {"right", "l-bottom"}:
-                return ("right", False)
-            if alignment in {"center", "p-center"}:
-                return ("left", True)
-        else:  # landscape
+        alignment = alignment.lower()
+        if "center" in alignment:
+            return ("left", True)
+        if orient == "landscape":
             if alignment == "l-top":
                 return ("right", False)
             if alignment == "l-bottom":
                 return ("left", False)
-            if alignment in {"l-center", "center"}:
-                return ("left", True)
-            if alignment == "left":
-                return ("left", False)
-            if alignment == "right":
-                return ("right", False)
+        if alignment == "right":
+            return ("right", False)
         return ("left", False)
 
-    # print each processed image
-    printer.set(
-        font="a",
-        bold=False,
-        double_height=False,
-        double_width=False,
-        invert=False,
-    )
-
-    for img_obj, align_val, path in processed_images:
+    for img_obj, align_val, scale_val, path in processed_images:
         if img_obj is None:
-            # failed to open image
             continue
 
-        # orientation, in case unified mode is on
         this_orient = (
-            batch_orientation if batch_orientation else desired_orientation(align_val)
+            batch_orientation
+            if batch_orientation is not None
+            else desired_orientation(align_val)
         )
-        align_cmd, center_flag = apply_alignment(align_val, this_orient)
+
+        if debug:
+            printer.set(align="left")
+            debug_text = f"[DEBUG] file={path}\n[DEBUG] align={align_val}, scale={scale_val:.2f}\n"
+            printer.textln(debug_text)
+
+        escpos_align, pixel_center = apply_alignment(align_val, this_orient)
+        printer.set(align=escpos_align)
 
         try:
-            printer.set(align=align_cmd)
-            printer.image(img_source=img_obj, center=center_flag)
+            printer.image(img_source=img_obj, center=pixel_center)
         except ImageWidthError as e:
             sys.stderr.write(f"Error printing {path}: image is too wide - {e}\n")
         except Exception as e:
             sys.stderr.write(f"Error printing {path}: {e}\n")
-
-    printer.cut()
-    printer.close()
 
 
 def create_parser():
@@ -436,7 +407,7 @@ def create_parser():
     """
     parser = argparse.ArgumentParser(
         description="Print text to a receipt printer. "
-        "If no subcommand is provided, piped input will be printed directly."
+        "If no subcommand is provided, piped input is read and printed directly."
     )
     subparsers = parser.add_subparsers(dest="command", help="Subcommands")
 
@@ -483,19 +454,22 @@ def create_parser():
     )
 
     # image
-    image_parser = subparsers.add_parser(
-        "image", help="Print one or more images with optional scaling/alignment."
-    )
+    image_parser = subparsers.add_parser("image", help="Print one or more images.")
     image_parser.add_argument("files", nargs="+", help="Image file(s) to print.")
     image_parser.add_argument(
         "--scale",
         default="1.0",
-        help="Comma-separated scale factors (floats). E.g. '1.0,0.5'. Default is 1.0.",
+        help="One or more comma-separated scale factors (floats). Default 1.0.",
     )
     image_parser.add_argument(
         "--align",
         default="center",
-        help="Comma-separated alignments. Valid: left, right, center, p-center, l-top, l-bottom, l-center. Default is 'center'.",
+        help="One or more comma-separated alignments. Valid: left, right, center, p-center, l-top, l-bottom, l-center. Default 'center' (where orientation is determined automatically).",
+    )
+    image_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print debug info (including alignment, scale) above each image.",
     )
 
     return parser
@@ -513,11 +487,14 @@ def main():
         else:
             parser.print_help()
             sys.exit(1)
+
     elif args.command == "echo":
         text = "\n".join(args.text) if args.lines else " ".join(args.text)
         print_text(text)
+
     elif args.command == "cat":
         cat_files(args.files)
+
     elif args.command == "count":
         # if files are provided, read them; otherwise, read from stdin
         if args.files:
@@ -538,10 +515,12 @@ def main():
                 )
                 sys.exit(1)
         print(count_lines(combined_text, CHAR_WIDTH))
+
     elif args.command == "shell":
         wrap_tty = not args.no_wrap
         output_text = run_shell_commands(args.commands, wrap_tty, CHAR_WIDTH)
         print_text(output_text)
+
     elif args.command == "image":
         scale_parts = [part.strip() for part in args.scale.split(",")]
         try:
@@ -568,7 +547,11 @@ def main():
                 )
                 sys.exit(1)
 
-        print_images(args.files, scale_list, align_parts)
+        printer = connect_printer()
+        print_images(printer, args.files, scale_list, align_parts, debug=args.debug)
+        printer.cut()
+        printer.close()
+
     else:
         sys.stderr.write("Invalid command.\n")
         sys.exit(1)
