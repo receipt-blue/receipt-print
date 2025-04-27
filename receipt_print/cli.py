@@ -38,6 +38,21 @@ def remove_ansi(text: str) -> str:
     return ansi_escape.sub("", text)
 
 
+def sanitize_output(text: str) -> str:
+    text = remove_ansi(text)
+    punctuation_map = str.maketrans(
+        {
+            "’": "'",
+            "‘": "'",
+            "“": '"',
+            "”": '"',
+            "–": "-",
+            "—": "-",
+        }
+    )
+    return text.translate(punctuation_map)
+
+
 def count_lines(text, width):
     """
     Count the number of printed lines by wrapping each line at the given width.
@@ -70,8 +85,8 @@ def connect_printer():
                     idVendor=vendor_id, idProduct=product_id, profile=PRINTER_PROFILE
                 )
             else:
-                import usb.backend.libusb1
-                import usb.core
+                import usb.backend.libusb1  # noqa: F401
+                import usb.core  # noqa: F401
 
                 backend = usb.backend.libusb1.get_backend(
                     find_library=lambda x: "/opt/homebrew/lib/libusb-1.0.dylib"
@@ -104,6 +119,8 @@ def print_text(text):
     cuts the receipt, and then closes the connection.
     If the text will print more than MAX_LINES, ask the user to confirm.
     """
+    text = sanitize_output(text)
+
     line_count = count_lines(text, CHAR_WIDTH)
     if line_count > MAX_LINES:
         prompt = (
@@ -163,7 +180,7 @@ def run_command_standard(cmd: str) -> str:
         combined = result.stdout
         if result.stderr:
             combined += "\n" + result.stderr
-        return remove_ansi(combined).rstrip("\n")
+        return sanitize_output(combined).rstrip("\n")
     except Exception as e:
         return f"Error running '{cmd}': {e}"
 
@@ -226,8 +243,8 @@ def run_command_in_wrapped_tty(cmd: str, columns: int) -> str:
     except OSError:
         pass
 
-    final_output = remove_ansi("".join(output_chunks)).rstrip("\n")
-    return final_output
+    final_output = "".join(output_chunks)
+    return sanitize_output(final_output).rstrip("\n")
 
 
 def run_shell_commands(commands, wrap_tty=True, columns=80):
@@ -253,13 +270,6 @@ def run_shell_commands(commands, wrap_tty=True, columns=80):
 def print_images(printer, files, scale_list, align_list, debug=False):
     """
     Load and print one or more images with optional scaling and alignment/orientation.
-
-    :param printer: An already-connected escpos printer object.
-    :param files: A list of image file paths.
-    :param scale_list: A list of scale factors (floats). If there are fewer scale factors than images,
-                       the last one is reused for subsequent images.
-    :param align_list: A list of alignment specifiers (strings). Valid: left, right, center, p-center, l-top, l-bottom, l-center.
-    :param debug: If True, print debug info (alignment, scale) above each image.
     """
     from PIL import Image
 
