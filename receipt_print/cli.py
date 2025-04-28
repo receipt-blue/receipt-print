@@ -39,6 +39,9 @@ def remove_ansi(text: str) -> str:
 
 
 def sanitize_output(text: str) -> str:
+    """
+    Strip ANSI escapes and normalize fancy punctuation to simple ASCII.
+    """
     text = remove_ansi(text)
     punctuation_map = str.maketrans(
         {
@@ -70,9 +73,8 @@ def count_lines(text, width):
 
 def connect_printer():
     """
-    Connect to the printer, prioritizing USB unless the environment variable
-    RP_NO_USB is set to 1, in which case skip USB entirely
-    and connect via the network if NETWORK_HOST is defined.
+    Connect to the printer, prioritizing USB unless RP_NO_USB=1,
+    otherwise fall back to network if NETWORK_HOST is set.
     """
     skip_usb = os.environ.get("RP_NO_USB", "0") == "1"
 
@@ -115,12 +117,9 @@ def connect_printer():
 
 def print_text(text):
     """
-    Connects to the printer, applies a basic text style, prints the text,
-    cuts the receipt, and then closes the connection.
-    If the text will print more than MAX_LINES, ask the user to confirm.
+    Print arbitrary text to the receipt, enforcing MAX_LINES limit.
     """
     text = sanitize_output(text)
-
     line_count = count_lines(text, CHAR_WIDTH)
     if line_count > MAX_LINES:
         prompt = (
@@ -156,7 +155,7 @@ def print_text(text):
 
 def cat_files(files):
     """
-    Reads and concatenates the contents of provided files, then sends them to the printer.
+    Reads and concatenates the contents of provided files, then prints them.
     """
     combined_text = ""
     for fname in files:
@@ -171,9 +170,7 @@ def cat_files(files):
 
 def run_command_standard(cmd: str) -> str:
     """
-    Run the command via subprocess.run with shell=True and capture both stdout & stderr.
-    Does not force text wrapping, so the output is whatever the local environment
-    or command chooses to do.
+    Run the command via subprocess.run and capture stdout+stderr.
     """
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -187,14 +184,10 @@ def run_command_standard(cmd: str) -> str:
 
 def run_command_in_wrapped_tty(cmd: str, columns: int) -> str:
     """
-    Run the command inside a pseudo-terminal that has `columns` set,
-    so programs that check TTY size will wrap output at `columns`.
-    Return the entire captured (stdout+stderr) text as a string.
+    Run the command in a PTY sized to `columns`, capturing its output.
     """
     master_fd, slave_fd = pty.openpty()
-
-    # set the PTY window size: (rows, columns, xpix, ypix)
-    rows = 999  # arbitrary large number of rows
+    rows = 999
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
 
     proc = subprocess.Popen(
@@ -249,25 +242,19 @@ def run_command_in_wrapped_tty(cmd: str, columns: int) -> str:
 
 def run_shell_commands(commands, wrap_tty=True, columns=80):
     """
-    Runs each command and captures its output in a format like:
-        $ command
-        [command output]
-        $ command2
-        [command2 output]
-    When wrap_tty is True (the default), each command is run in a PTY with `columns` set.
-    Otherwise, a normal subprocess capture is used.
+    Runs each command and captures its output, with optional PTY wrapping.
     """
     pairs = []
     for cmd in commands:
         if wrap_tty:
-            cmd_output = run_command_in_wrapped_tty(cmd, columns)
+            out = run_command_in_wrapped_tty(cmd, columns)
         else:
-            cmd_output = run_command_standard(cmd)
-        pairs.append(f"$ {cmd}\n{cmd_output}")
+            out = run_command_standard(cmd)
+        pairs.append(f"$ {cmd}\n{out}")
     return "\n\n\n".join(pairs)
 
 
-def print_images(printer, files, scale_list, align_list, debug=False):
+def print_images(printer, files, scale_list, align_list, debug=False, spacing=1):
     """
     Load and print one or more images with optional scaling and alignment/orientation.
     """
@@ -285,72 +272,56 @@ def print_images(printer, files, scale_list, align_list, debug=False):
     except Exception:
         pass
 
-    # "extend" either scale or alignment lists if they have fewer entries than files
     def get_val(lst, i):
-        if i < len(lst):
-            return lst[i]
-        return lst[-1]
+        return lst[i] if i < len(lst) else lst[-1]
 
     expanded_aligns = [get_val(align_list, i).lower() for i in range(len(files))]
     expanded_scales = [float(get_val(scale_list, i)) for i in range(len(files))]
 
-    def desired_orientation(align_val):
-        if align_val in {"l-top", "l-bottom", "l-center"}:
+    def desired_orientation(al):
+        if al in {"l-top", "l-bottom", "l-center"}:
             return "landscape"
         return "portrait"
 
     force_unified = len(set(expanded_aligns)) == 1
-    batch_orientation = (
-        desired_orientation(expanded_aligns[0]) if force_unified else None
-    )
+    batch_orient = desired_orientation(expanded_aligns[0]) if force_unified else None
 
-    total_estimated_lines = 0
-    processed_images = []  # will store (image_obj, alignment_used, scale_used, file_path)
+    total_lines = 0
+    processed = []
 
-    for i, file_path in enumerate(files):
-        user_scale = expanded_scales[i]
-        user_align = expanded_aligns[i]
-        if batch_orientation is not None:
-            user_align = expanded_aligns[0]
-        orientation = (
-            batch_orientation
-            if batch_orientation is not None
-            else desired_orientation(user_align)
-        )
+    for i, path in enumerate(files):
+        scale = expanded_scales[i]
+        al = expanded_aligns[i] if batch_orient is None else expanded_aligns[0]
+        orient = batch_orient or desired_orientation(al)
 
         try:
-            img = Image.open(file_path)
+            img = Image.open(path)
             img.load()
         except Exception as e:
-            sys.stderr.write(f"Warning: could not open {file_path}: {e}\n")
-            processed_images.append((None, user_align, user_scale, file_path))
+            sys.stderr.write(f"Warning: could not open {path}: {e}\n")
+            processed.append((None, al, scale, path))
             continue
 
-        # rotate if landscape
-        if orientation == "landscape":
+        if orient == "landscape":
             img = img.rotate(270, expand=True)
 
-        # force-fit image to printer's max width if necessary
         if img.width > max_width:
-            force_ratio = max_width / img.width
-            new_w = int(img.width * force_ratio)
-            new_h = int(img.height * force_ratio)
-            img = img.resize((new_w, new_h), resample)
+            ratio = max_width / img.width
+            img = img.resize(
+                (int(img.width * ratio), int(img.height * ratio)), resample
+            )
 
-        # apply user scale relative to forced size
-        if not math.isclose(user_scale, 1.0, rel_tol=1e-5):
-            scaled_w = int(img.width * user_scale)
-            scaled_h = int(img.height * user_scale)
-            img = img.resize((scaled_w, scaled_h), resample)
+        if not math.isclose(scale, 1.0, rel_tol=1e-5):
+            img = img.resize(
+                (int(img.width * scale), int(img.height * scale)), resample
+            )
 
-        lines_estimate = math.ceil(img.height / DOTS_PER_LINE)
-        total_estimated_lines += lines_estimate
+        total_lines += math.ceil(img.height / DOTS_PER_LINE)
+        processed.append((img, al, scale, path))
 
-        processed_images.append((img, user_align, user_scale, file_path))
-
-    if total_estimated_lines > MAX_LINES:
+    if total_lines > MAX_LINES:
         prompt = (
-            f"Warning: Image(s) will print approximately {total_estimated_lines} lines, "
+            f"Warning: Image(s) will print approximately {total_lines} lines, "
             f"which exceeds the limit of {MAX_LINES}.\n"
             "Do you want to continue? [y/N] "
         )
@@ -358,12 +329,12 @@ def print_images(printer, files, scale_list, align_list, debug=False):
             with open("/dev/tty", "r") as tty:
                 sys.stdout.write(prompt)
                 sys.stdout.flush()
-                confirm = tty.readline().strip()
+                ans = tty.readline().strip()
         except Exception:
             sys.stderr.write("No interactive input available. Aborting.\n")
             sys.exit(1)
 
-        if confirm.lower() not in ("y", "yes"):
+        if ans.lower() not in ("y", "yes"):
             sys.exit(0)
 
     printer.set(
@@ -376,111 +347,102 @@ def print_images(printer, files, scale_list, align_list, debug=False):
         """
         alignment = alignment.lower()
         if "center" in alignment:
-            return ("left", True)
+            return "left", True
         if orient == "landscape":
             if alignment == "l-top":
-                return ("right", False)
+                return "right", False
             if alignment == "l-bottom":
-                return ("left", False)
+                return "left", False
         if alignment == "right":
-            return ("right", False)
-        return ("left", False)
+            return "right", False
+        return "left", False
 
-    for img_obj, align_val, scale_val, path in processed_images:
+    for img_obj, al, scale, path in processed:
         if img_obj is None:
             continue
 
-        this_orient = (
-            batch_orientation
-            if batch_orientation is not None
-            else desired_orientation(align_val)
-        )
-
+        orient = batch_orient or desired_orientation(al)
         if debug:
             printer.set(align="left")
-            debug_text = f"[DEBUG] file={path}\n[DEBUG] align={align_val}, scale={scale_val:.2f}\n"
-            printer.textln(debug_text)
+            printer.textln(f"[DEBUG] file={path}")
+            printer.textln(f"[DEBUG] align={al}, scale={scale:.2f}")
 
-        escpos_align, pixel_center = apply_alignment(align_val, this_orient)
-        printer.set(align=escpos_align)
-
+        esc_align, center_flag = apply_alignment(al, orient)
+        printer.set(align=esc_align)
         try:
-            printer.image(img_source=img_obj, center=pixel_center)
+            printer.image(img_source=img_obj, center=center_flag)
+            if spacing > 0:
+                printer.text("\n" * spacing)
         except ImageWidthError as e:
-            sys.stderr.write(f"Error printing {path}: image is too wide - {e}\n")
+            sys.stderr.write(f"Error printing {path}: too wide – {e}\n")
         except Exception as e:
             sys.stderr.write(f"Error printing {path}: {e}\n")
 
 
 def create_parser():
     """
-    Create the argument parser with subcommands for text, file, count, shell, and image printing.
+    Build the CLI argument parser.
     """
     parser = argparse.ArgumentParser(
-        description="Print text to a receipt printer. "
-        "If no subcommand is provided, piped input is read and printed directly."
+        description="Print text or images to a receipt printer."
     )
-    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
+    subs = parser.add_subparsers(dest="command", help="Subcommands")
 
     # echo
-    echo_parser = subparsers.add_parser(
-        "echo", help="Print direct text passed as arguments."
-    )
-    echo_parser.add_argument("text", nargs="+", help="Text to print.")
-    echo_parser.add_argument(
+    echo = subs.add_parser("echo", help="Print literal text.")
+    echo.add_argument("text", nargs="+", help="Text to print.")
+    echo.add_argument(
         "-l",
         "--lines",
         action="store_true",
-        help="Join the input arguments with newlines instead of spaces.",
+        help="Join args with newlines instead of spaces.",
     )
 
     # cat
-    cat_parser = subparsers.add_parser("cat", help="Print the contents of file(s).")
-    cat_parser.add_argument("files", nargs="+", help="File(s) to print")
+    cat = subs.add_parser("cat", help="Print files' contents.")
+    cat.add_argument("files", nargs="+", help="Files to print.")
 
     # count
-    count_parser = subparsers.add_parser(
-        "count",
-        help="Calculate the number of lines that would be printed if running 'cat' on a given input.",
-    )
-    count_parser.add_argument(
-        "files",
-        nargs="*",
-        help="File(s) to count lines from. If omitted, piped input is used.",
-    )
+    cnt = subs.add_parser("count", help="Count printed lines for files or piped stdin.")
+    cnt.add_argument("files", nargs="*", help="Files to count; omit to read stdin.")
 
     # shell
-    shell_parser = subparsers.add_parser(
-        "shell", help="Run shell commands and print their output."
-    )
-    shell_parser.add_argument(
-        "commands",
-        nargs="+",
-        help="One or more commands to run, e.g. 'ls -l' 'uname -a'",
-    )
-    shell_parser.add_argument(
+    sh = subs.add_parser("shell", help="Run shell commands and print output.")
+    sh.add_argument("commands", nargs="+", help="Commands to run.")
+    sh.add_argument(
         "--no-wrap",
         action="store_true",
-        help="Disable PTY wrapping; run commands using standard subprocess capture.",
+        help="Standard subprocess capture instead of PTY wrap.",
     )
 
     # image
-    image_parser = subparsers.add_parser("image", help="Print one or more images.")
-    image_parser.add_argument("files", nargs="+", help="Image file(s) to print.")
-    image_parser.add_argument(
+    img = subs.add_parser("image", help="Print one or more images.")
+    img.add_argument(
+        "files", nargs="+", help="Image files or directories containing images."
+    )
+    img.add_argument(
         "--scale",
         default="1.0",
-        help="One or more comma-separated scale factors (floats). Default 1.0.",
+        help="Comma-separated floats for per-image scale factors.",
     )
-    image_parser.add_argument(
+    img.add_argument(
         "--align",
         default="center",
-        help="One or more comma-separated alignments. Valid: left, right, center, p-center, l-top, l-bottom, l-center. Default 'center' (where orientation is determined automatically).",
+        help="Comma-separated alignments: left, right, center, p-center, l-top, l-bottom, l-center.",
     )
-    image_parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Print debug info (including alignment, scale) above each image.",
+    img.add_argument(
+        "--heading",
+        help="Optional heading printed before images.",
+    )
+    img.add_argument("--caption", help="Optional caption printed after images.")
+    img.add_argument(
+        "--spacing",
+        type=int,
+        default=1,
+        help="Number of blank lines to insert between each image (default 1).",
+    )
+    img.add_argument(
+        "--debug", action="store_true", help="Print debug info above each image."
     )
 
     return parser
@@ -491,75 +453,112 @@ def main():
     args = parser.parse_args()
 
     if args.command is None:
-        # read from stdin if no subcommand is specified
         if not sys.stdin.isatty():
-            piped_text = sys.stdin.read()
-            print_text(piped_text)
+            print_text(sys.stdin.read())
         else:
             parser.print_help()
             sys.exit(1)
 
     elif args.command == "echo":
-        text = "\n".join(args.text) if args.lines else " ".join(args.text)
-        print_text(text)
+        txt = "\n".join(args.text) if args.lines else " ".join(args.text)
+        print_text(txt)
 
     elif args.command == "cat":
         cat_files(args.files)
 
     elif args.command == "count":
-        # if files are provided, read them; otherwise, read from stdin
         if args.files:
-            combined_text = ""
-            for fname in args.files:
+            txt = ""
+            for f in args.files:
                 try:
-                    with open(fname, "r") as f:
-                        combined_text += f.read()
+                    with open(f, "r") as fh:
+                        txt += fh.read()
                 except Exception as e:
-                    sys.stderr.write(f"Error reading {fname}: {e}\n")
+                    sys.stderr.write(f"Error reading {f}: {e}\n")
                     sys.exit(1)
         else:
             if not sys.stdin.isatty():
-                combined_text = sys.stdin.read()
+                txt = sys.stdin.read()
             else:
                 sys.stderr.write(
                     "No input provided for counting. Use files or pipe text.\n"
                 )
                 sys.exit(1)
-        print(count_lines(combined_text, CHAR_WIDTH))
+        print(count_lines(txt, CHAR_WIDTH))
 
     elif args.command == "shell":
-        wrap_tty = not args.no_wrap
-        output_text = run_shell_commands(args.commands, wrap_tty, CHAR_WIDTH)
-        print_text(output_text)
+        wrap = not args.no_wrap
+        out = run_shell_commands(args.commands, wrap, CHAR_WIDTH)
+        print_text(out)
 
     elif args.command == "image":
-        scale_parts = [part.strip() for part in args.scale.split(",")]
+        # parse scales
+        parts = [p.strip() for p in args.scale.split(",")]
         try:
-            scale_list = [float(x) for x in scale_parts]
+            scales = [float(x) for x in parts]
         except ValueError as e:
             sys.stderr.write(f"Invalid scale factor: {e}\n")
             sys.exit(1)
 
-        # parse alignments
-        align_parts = [a.strip().lower() for a in args.align.split(",")]
-        valid_aligns = {
-            "left",
-            "right",
-            "center",
-            "p-center",
-            "l-top",
-            "l-bottom",
-            "l-center",
-        }
-        for a in align_parts:
-            if a not in valid_aligns:
-                sys.stderr.write(
-                    f"Invalid alignment '{a}'. Valid: {sorted(valid_aligns)}\n"
-                )
+        # parse aligns
+        aligns = [a.strip().lower() for a in args.align.split(",")]
+        valid = {"left", "right", "center", "p-center", "l-top", "l-bottom", "l-center"}
+        for a in aligns:
+            if a not in valid:
+                sys.stderr.write(f"Invalid alignment '{a}'. Valid: {sorted(valid)}\n")
                 sys.exit(1)
 
+        # collect files (expand dirs)
+        def collect(paths):
+            exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
+            out = []
+            for p in paths:
+                if os.path.isdir(p):
+                    for e in sorted(os.listdir(p)):
+                        if e.lower().endswith(exts):
+                            out.append(os.path.join(p, e))
+                else:
+                    out.append(p)
+            return out
+
+        image_files = collect(args.files)
+        if not image_files:
+            sys.stderr.write("No usable images found.\n")
+            sys.exit(1)
+
+        # open printer once
         printer = connect_printer()
-        print_images(printer, args.files, scale_list, align_parts, debug=args.debug)
+
+        # heading
+        if args.heading:
+            printer.set(
+                align="center",
+                font="a",
+                bold=False,
+                double_height=True,
+                double_width=True,
+            )
+            printer.text(args.heading + "\n")
+            printer.set(
+                align="left",
+                font="a",
+                bold=False,
+                double_height=False,
+                double_width=False,
+            )
+
+        # print images
+        print_images(
+            printer, image_files, scales, aligns, debug=args.debug, spacing=args.spacing
+        )
+
+        # caption
+        if args.caption:
+            printer.text("\n")
+            printer.set(align="center", font="b", bold=True)
+            printer.text(args.caption + "\n")
+            printer.set(align="left", font="a", bold=False)
+
         printer.cut()
         printer.close()
 
