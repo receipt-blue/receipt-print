@@ -445,6 +445,13 @@ def create_parser():
         "--debug", action="store_true", help="Print debug info above each image."
     )
 
+    # action
+    action = subs.add_parser("action", help="Perform printer actions.")
+    action_subs = action.add_subparsers(
+        dest="action_command", help="Action subcommands"
+    )
+    action_subs.add_parser("cut", help="Cut the paper.")
+
     return parser
 
 
@@ -561,6 +568,15 @@ def main():
 
         printer.cut()
         printer.close()
+
+    elif args.command == "action":
+        if args.action_command == "cut":
+            printer = connect_printer()
+            printer.cut()
+            printer.close()
+        else:
+            sys.stderr.write("Invalid action command.\n")
+            sys.exit(1)
 
     else:
         sys.stderr.write("Invalid command.\n")
