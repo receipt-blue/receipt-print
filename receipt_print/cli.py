@@ -11,12 +11,9 @@ import struct
 import subprocess
 import sys
 import termios
+from datetime import datetime
 
-from escpos.exceptions import (
-    DeviceNotFoundError,
-    ImageWidthError,
-    USBNotFoundError,
-)
+from escpos.exceptions import DeviceNotFoundError, ImageWidthError, USBNotFoundError
 from escpos.printer import Network, Usb
 
 # configuration
@@ -27,10 +24,9 @@ PRINTER_PROFILE = os.getenv("RP_PROFILE", "TM-T20II")
 CHAR_WIDTH = int(os.getenv("RP_CHAR_WIDTH", "42"))
 CHARCODE = os.getenv("RP_CHARCODE", "CP437")
 MAX_LINES = int(os.getenv("RP_MAX_LINES", "40"))
-DOTS_PER_LINE = 24  # for estimating how many lines of text a printed image occupies
+DOTS_PER_LINE = 24  # 24-dot head → ~1 text line per 24 px
 
-# ---- dithering kernels -------------------------------------------------
-# weights sum to 1.0 for error diffusion
+# error-diffusion kernels (weights sum to 1)
 ATKINSON_KERNEL = [
     (+1, 0, 1 / 8),
     (+2, 0, 1 / 8),
@@ -51,8 +47,8 @@ def remove_ansi(text: str) -> str:
     """
     Remove common ANSI escape sequences so they don't garble receipt output.
     """
-    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-    return ansi_escape.sub("", text)
+    ansi_re = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_re.sub("", text)
 
 
 def sanitize_output(text: str) -> str:
@@ -216,47 +212,31 @@ def run_command_in_wrapped_tty(cmd: str, columns: int) -> str:
         text=True,
         close_fds=True,
     )
-
-    output_chunks = []
-    while True:
-        if proc.poll() is not None:
-            while True:
-                rlist, _, _ = select.select([master_fd], [], [], 0)
-                if not rlist:
-                    break
-                try:
-                    data = os.read(master_fd, 1024)
-                    if not data:
-                        break
-                    output_chunks.append(data.decode("utf-8", "replace"))
-                except OSError:
-                    break
-            break
-
+    chunks = []
+    while proc.poll() is None:
         rlist, _, _ = select.select([master_fd], [], [], 0.1)
         if master_fd in rlist:
-            try:
-                data = os.read(master_fd, 1024)
-                if not data:
-                    break
-                output_chunks.append(data.decode("utf-8", "replace"))
-            except OSError:
+            data = os.read(master_fd, 1024)
+            if not data:
                 break
-
+            chunks.append(data.decode("utf-8", "replace"))
+    while True:
+        rlist, _, _ = select.select([master_fd], [], [], 0)
+        if not rlist:
+            break
+        data = os.read(master_fd, 1024)
+        if not data:
+            break
+        chunks.append(data.decode("utf-8", "replace"))
     os.close(master_fd)
     try:
         os.close(slave_fd)
     except OSError:
         pass
-
-    final_output = "".join(output_chunks)
-    return sanitize_output(final_output).rstrip("\n")
+    return sanitize_output("".join(chunks)).rstrip()
 
 
 def run_shell_commands(commands, wrap_tty=True, columns=80):
-    """
-    Runs each command and captures its output, with optional PTY wrapping.
-    """
     pairs = []
     for cmd in commands:
         if wrap_tty:
