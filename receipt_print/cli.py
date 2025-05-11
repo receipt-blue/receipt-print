@@ -271,11 +271,12 @@ def print_images(
         img: Image.Image, mode: str, thresh: float, diff: float
     ) -> Image.Image:
         if not mode or mode == "none":
-            return img.convert("1", dither=Image.NONE)
+            return img.convert("1")
         if mode == "thresh":
             g = img.convert("L")
             cut = int(thresh * 255)
-            return g.point(lambda p: 255 if p >= cut else 0, mode="1")
+            def threshold_fn(x): return 255 if x > cut else 0
+            return g.convert("L").point(threshold_fn, mode="1")
         g = img.convert("L") if img.mode != "L" else img.copy()
         px = np.asarray(g, dtype=np.float32) / 255.0
         h, w = px.shape
@@ -328,7 +329,7 @@ def print_images(
             )
 
         total_lines += math.ceil(img.height / DOTS_PER_LINE)
-        processed.append((img, al, idx, path))
+        processed.append((img, al, idx, path, scale))
 
     # line-limit warning
     if total_lines > MAX_LINES:
@@ -345,7 +346,7 @@ def print_images(
             sys.exit(1)
 
     # print each
-    for img, al, idx, path in processed:
+    for img, al, idx, path, scale in processed:
         orient = desired_orientation(al)
         method = get(method_list, idx)
         impl = impl_map[method]
