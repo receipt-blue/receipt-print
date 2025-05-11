@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import fcntl
+import io
 import math
 import os
 import platform
@@ -225,11 +227,25 @@ def print_images(
     dither_list,
     threshold_list,
     diffusion_list,
+    captions_str=None,
+    footer_text=None,
     debug=False,
     spacing=1,
 ):
     import numpy as np
     from PIL import Image
+
+    # parsed captions (per-image)
+    parsed_captions_list = []
+    if captions_str:
+        try:
+            reader = csv.reader(io.StringIO(captions_str))
+            parsed_captions_list = next(reader, [])
+            parsed_captions_list = [c.strip() for c in parsed_captions_list]
+        except Exception as e:
+            sys.stderr.write(
+                f"Warning: Could not parse --caption string '{captions_str}': {e}\n"
+            )
 
     # determine max width
     max_width = 576
@@ -275,7 +291,10 @@ def print_images(
         if mode == "thresh":
             g = img.convert("L")
             cut = int(thresh * 255)
-            def threshold_fn(x): return 255 if x > cut else 0
+
+            def threshold_fn(x):
+                return 255 if x > cut else 0
+
             return g.convert("L").point(threshold_fn, mode="1")
         g = img.convert("L") if img.mode != "L" else img.copy()
         px = np.asarray(g, dtype=np.float32) / 255.0
@@ -383,12 +402,33 @@ def print_images(
         printer.set(align=esc_align)
         try:
             printer.image(img_source=img2, center=center, impl=impl)
+
+            # per-image caption
+            if idx < len(parsed_captions_list) and parsed_captions_list[idx]:
+                # caption block
+                printer.text("\n")
+                printer.set(align="center", font="b", bold=True)
+                printer.text(parsed_captions_list[idx] + "\n")
+                printer.set(align="left")
+                if idx < len(processed) - 1:
+                    # extra padding if another image follows
+                    printer.text("\n")
+
+            # spacing after each block
             if spacing:
                 printer.text("\n" * spacing)
+
         except ImageWidthError as e:
             sys.stderr.write(f"Error printing {path}: too wide – {e}\n")
         except Exception as e:
             sys.stderr.write(f"Error printing {path}: {e}\n")
+
+    # global footer
+    if footer_text:
+        printer.text("\n")
+        printer.set(align="center", font="b", bold=True)
+        printer.text(footer_text + "\n")
+        printer.set(align="left")
 
 
 def create_parser():
@@ -453,7 +493,14 @@ def create_parser():
         help="Comma-separated diffusion strength (0=no spread,1=classic).",
     )
     img.add_argument("--heading", help="Optional heading before images.")
-    img.add_argument("--caption", help="Optional caption after images.")
+    img.add_argument(
+        "--caption",
+        help="Comma-separated list of per-image captions.",
+    )
+    img.add_argument(
+        "--footer",
+        help="Global footer text to print after all images.",
+    )
     img.add_argument(
         "--spacing", type=int, default=1, help="Blank lines between each image."
     )
@@ -524,7 +571,6 @@ def main():
             sys.exit(1)
         return
 
-    # ── image sub-command ───────────────────────────────────────────────
     if args.command == "image":
         # parse lists
         scales = [float(x) for x in args.scale.split(",")]
@@ -553,6 +599,10 @@ def main():
             sys.exit(1)
 
         ts_fmt = None if args.timestamp.lower() == "none" else args.timestamp
+
+        # grab per-image captions & global footer
+        captions_str = args.caption if hasattr(args, "caption") else None
+        footer_text = args.footer if hasattr(args, "footer") else None
 
         # collect files
         def collect(paths):
@@ -589,16 +639,16 @@ def main():
             dithers,
             thresholds,
             diffusions,
+            captions_str=captions_str,
+            footer_text=footer_text,
             debug=args.debug,
             spacing=args.spacing,
         )
 
-        if args.caption:
-            printer.text("\n")
-            printer.set(align="center", font="b", bold=True)
-            printer.text(args.caption + "\n")
-            printer.set(align="left")
-
         printer.cut()
         printer.close()
         return
+
+
+if __name__ == "__main__":
+    main()
