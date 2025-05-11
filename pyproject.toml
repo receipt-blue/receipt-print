@@ -8,6 +8,8 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "discord>=2.3.2",
+    "dotenv>=0.9.9",
     "numpy>=2.2.5",
     "python-escpos>=3.1",
     "pyusb>=1.3.1",
