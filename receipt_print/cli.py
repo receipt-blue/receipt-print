@@ -47,7 +47,9 @@ def create_parser():
 
     # image
     img = subs.add_parser("image", help="Print one or more images.")
-    img.add_argument("files", nargs="+", help="Image files or directories.")
+    img.add_argument(
+        "files", nargs="*", help="Image files or directories; omit for stdin."
+    )
     img.add_argument(
         "--scale", default="1.0", help="Comma-separated floats for per-image scale."
     )
@@ -144,6 +146,13 @@ def main():
         return
 
     if args.command == "image":
+        if not args.files:
+            if not sys.stdin.isatty():
+                args.files = [p for p in sys.stdin.read().split() if p]
+            else:
+                sys.stderr.write("No image paths provided.\n")
+                sys.exit(1)
+
         scales = [float(x) for x in args.scale.split(",")]
 
         aligns = [a.strip().lower() for a in args.align.split(",")]
@@ -183,6 +192,12 @@ def main():
                         if e.lower().endswith(exts):
                             out.append(os.path.join(p, e))
                 else:
+                    if not os.path.isfile(p):
+                        sys.stderr.write(f"missing file: {p}\n")
+                        sys.exit(1)
+                    if not p.lower().endswith(exts):
+                        sys.stderr.write(f"unsupported file type: {p}\n")
+                        sys.exit(1)
                     out.append(p)
             return out
 

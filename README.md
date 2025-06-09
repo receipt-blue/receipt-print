@@ -28,10 +28,10 @@ Print file content:
 receipt-print cat file1.txt file2.txt
 ```
 
-Count how many lines would be printed:
+Print images:
 ```bash
-receipt-print count file.txt
-man ls | receipt-print count
+receipt-print image img1.png img2.png
+cat image_paths.txt | receipt-print image
 ```
 
 Run command(s) and print captured output:
