@@ -82,6 +82,155 @@ def apply_dither(
     return Image.fromarray(arr, mode="L").convert("1")
 
 
+def print_images_from_pil(
+    printer,
+    images: Iterable[Image.Image],
+    scale_list: List[float],
+    align_list: List[str],
+    method_list: List[str],
+    ts_format: Optional[str],
+    dither_list: List[Optional[str]],
+    threshold_list: List[float],
+    diffusion_list: List[float],
+    captions_str: Optional[str] = None,
+    footer_text: Optional[str] = None,
+    debug: bool = False,
+    spacing: int = 1,
+    names: Optional[Iterable[str]] = None,
+) -> None:
+    """print pre-loaded PIL images"""
+
+    parsed_captions_list: List[str] = []
+    if captions_str:
+        try:
+            reader = csv.reader(io.StringIO(captions_str))
+            parsed_captions_list = next(reader, [])
+            parsed_captions_list = [c.strip() for c in parsed_captions_list]
+        except Exception as e:
+            sys.stderr.write(
+                f"Warning: Could not parse --caption string '{captions_str}': {e}\n"
+            )
+
+    img_list = list(images)
+    name_list = (
+        list(names) if names is not None else [f"{i}" for i in range(len(img_list))]
+    )
+
+    max_width = 576
+    try:
+        w = printer.profile.profile_data["media"]["width"]["pixels"]
+        if w != "Unknown":
+            max_width = int(w)
+    except Exception:
+        pass
+
+    impl_map = {
+        "raster": "bitImageRaster",
+        "column": "bitImageColumn",
+        "graphics": "graphics",
+    }
+
+    def get(lst, i):
+        return lst[i] if i < len(lst) else lst[-1]
+
+    processed = []
+    total_lines = 0
+    for idx, img in enumerate(img_list):
+        scale = float(get(scale_list, idx))
+        al = get(align_list, idx).lower()
+        orient = desired_orientation(al)
+
+        im = img.copy()
+        if orient == "landscape":
+            im = im.rotate(270, expand=True)
+
+        if im.width > max_width:
+            ratio = max_width / im.width
+            im = im.resize(
+                (int(im.width * ratio), int(im.height * ratio)),
+                Image.Resampling.LANCZOS,
+            )
+
+        if not math.isclose(scale, 1.0, rel_tol=1e-5):
+            im = im.resize(
+                (int(im.width * scale), int(im.height * scale)),
+                Image.Resampling.LANCZOS,
+            )
+
+        total_lines += math.ceil(im.height / DOTS_PER_LINE)
+        processed.append((im, al, idx, name_list[idx], scale))
+
+    if total_lines > MAX_LINES:
+        try:
+            with open("/dev/tty") as tty:
+                sys.stdout.write(
+                    f"Warning: {total_lines} image-lines > limit {MAX_LINES}. Continue? [y/N] "
+                )
+                sys.stdout.flush()
+                if tty.readline().strip().lower() not in ("y", "yes"):
+                    sys.exit(0)
+        except Exception:
+            sys.stderr.write("No TTY for confirm. Aborting.\n")
+            sys.exit(1)
+
+    for im, al, idx, name, scale in processed:
+        orient = desired_orientation(al)
+        method = get(method_list, idx)
+        impl = impl_map[method]
+        dith = get(dither_list, idx)
+        thresh = float(get(threshold_list, idx))
+        diff = float(get(diffusion_list, idx))
+        esc_align, center = apply_alignment(al, orient)
+
+        if debug:
+            printer.set(align="left")
+            printer.textln(f"[DEBUG] file={name}")
+            printer.textln(
+                f"[DEBUG] align={al}, scale={scale:.2f}, "
+                f"method={method}, dither={dith}, "
+                f"threshold={thresh:.2f}, diffusion={diff:.2f}"
+            )
+            printer.set(align="left")
+
+        if ts_format is not None:
+            try:
+                exif = im._getexif() or {}
+                raw = exif.get(36867) or exif.get(306)
+                if raw:
+                    dt = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+                    printer.set(align="left", font="b", bold=True)
+                    printer.text(dt.strftime(ts_format) + "\n")
+            except Exception:
+                pass
+
+        img2 = apply_dither(im, dith, thresh, diff)
+        printer.set(align=esc_align)
+        try:
+            printer.image(img_source=img2, center=center, impl=impl)
+
+            if idx < len(parsed_captions_list) and parsed_captions_list[idx]:
+                printer.text("\n")
+                printer.set(align="center", font="b", bold=True)
+                printer.text(parsed_captions_list[idx] + "\n")
+                printer.set(align="left")
+                if idx < len(processed) - 1:
+                    printer.text("\n")
+
+            if spacing:
+                printer.text("\n" * spacing)
+
+        except ImageWidthError as e:
+            sys.stderr.write(f"Error printing {name}: too wide – {e}\n")
+        except Exception as e:
+            sys.stderr.write(f"Error printing {name}: {e}\n")
+
+    if footer_text:
+        printer.text("\n")
+        printer.set(align="center", font="b", bold=True)
+        printer.text(footer_text + "\n")
+        printer.set(align="left")
+
+
 def print_images(
     printer,
     files: Iterable[str],

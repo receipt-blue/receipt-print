@@ -34,6 +34,15 @@ receipt-print image img1.png img2.png
 cat image_paths.txt | receipt-print image
 ```
 
+Print PDFs:
+```bash
+receipt-print pdf document.pdf
+receipt-print pdf --pages 1,3,5 document.pdf
+
+# convert to text first
+receipt-print pdf --format text document.pdf
+```
+
 Run command(s) and print captured output:
 ```bash
 receipt-print shell "ls -l" "git status"
