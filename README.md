@@ -32,12 +32,16 @@ Print images:
 ```bash
 receipt-print image img1.png img2.png
 cat image_paths.txt | receipt-print image
+pbpaste | receipt-print image  # clipboard file or path
 ```
 
 Print PDFs:
 ```bash
 receipt-print pdf document.pdf
 receipt-print pdf --pages 1,3,5 document.pdf
+
+# print from clipboard (path or file)
+pbpaste | receipt-print pdf  # or paste from `wl-paste` / `xclip -selection clipboard -o`
 
 # convert to text first
 receipt-print pdf --format text document.pdf

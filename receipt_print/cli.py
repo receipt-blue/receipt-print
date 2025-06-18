@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import os
 import sys
+import io
+import shlex
 from dataclasses import dataclass
 from typing import List, Optional
+from tempfile import NamedTemporaryFile
 
 import click
 from PIL import Image
@@ -237,37 +240,56 @@ def shell(commands, no_wrap):
 @add_image_options
 def image(files, **kwargs):
     """Print one or more images."""
+    img_bytes = None
     if not files:
         if not sys.stdin.isatty():
-            files = [p for p in sys.stdin.read().split() if p]
+            data = sys.stdin.buffer.read()
+            try:
+                txt = data.decode().strip()
+            except Exception:
+                txt = ""
+            parts = shlex.split(txt)
+            if parts and all(os.path.exists(os.path.expanduser(p)) for p in parts):
+                files = [os.path.expanduser(p) for p in parts]
+            else:
+                img_bytes = data if data else None
         else:
             click.echo("No image paths provided.", err=True)
             sys.exit(1)
 
-    # Collect image files
-    exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
-    img_files = []
-    for p in files:
-        if os.path.isdir(p):
-            for e in sorted(os.listdir(p)):
-                if e.lower().endswith(exts):
-                    img_files.append(os.path.join(p, e))
-        else:
-            if not os.path.isfile(p):
-                click.echo(f"missing file: {p}", err=True)
-                sys.exit(1)
-            if not p.lower().endswith(exts):
-                click.echo(f"unsupported file type: {p}", err=True)
-                sys.exit(1)
-            img_files.append(p)
+    if img_bytes is not None:
+        try:
+            images = [Image.open(io.BytesIO(img_bytes))]
+            names = ["stdin"]
+        except Exception as e:
+            click.echo(f"Invalid image data: {e}", err=True)
+            sys.exit(1)
+    else:
+        exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
+        img_files = []
+        for p in files:
+            if os.path.isdir(p):
+                for e in sorted(os.listdir(p)):
+                    if e.lower().endswith(exts):
+                        img_files.append(os.path.join(p, e))
+            else:
+                if not os.path.isfile(p):
+                    click.echo(f"missing file: {p}", err=True)
+                    sys.exit(1)
+                if not p.lower().endswith(exts):
+                    click.echo(f"unsupported file type: {p}", err=True)
+                    sys.exit(1)
+                img_files.append(p)
 
-    if not img_files:
-        click.echo("No usable images found.", err=True)
-        sys.exit(1)
+        if not img_files:
+            click.echo("No usable images found.", err=True)
+            sys.exit(1)
 
-    images = [Image.open(f) for f in img_files]
+        images = [Image.open(f) for f in img_files]
+        names = img_files
+
     config = create_image_config(**kwargs)
-    print_with_images(config, images, names=img_files, heading=kwargs["heading"])
+    print_with_images(config, images, names=names, heading=kwargs["heading"])
 
 
 @cli.command()
@@ -283,9 +305,19 @@ def image(files, **kwargs):
 @add_image_options
 def pdf(files, format, range, pages, **kwargs):
     """Print PDF files."""
+    pdf_bytes = None
     if not files:
         if not sys.stdin.isatty():
-            files = [p for p in sys.stdin.read().split() if p]
+            data = sys.stdin.buffer.read()
+            try:
+                txt = data.decode().strip()
+            except Exception:
+                txt = ""
+            parts = shlex.split(txt)
+            if parts and all(os.path.exists(os.path.expanduser(p)) for p in parts):
+                files = [os.path.expanduser(p) for p in parts]
+            else:
+                pdf_bytes = data if data else None
         else:
             click.echo("No PDF paths provided.", err=True)
             sys.exit(1)
@@ -323,13 +355,31 @@ def pdf(files, format, range, pages, **kwargs):
     if format == "text":
         from .pdf_utils import pdf_to_text
 
-        txt = pdf_to_text(files, page_filter)
+        if pdf_bytes is not None:
+            with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(pdf_bytes)
+                tmp_path = tmp.name
+            try:
+                txt = pdf_to_text([tmp_path], page_filter)
+            finally:
+                os.unlink(tmp_path)
+        else:
+            txt = pdf_to_text(files, page_filter)
         print_text(txt)
         return
 
     from .pdf_utils import pdf_to_images
 
-    images, names = pdf_to_images(files, page_filter)
+    if pdf_bytes is not None:
+        with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+        try:
+            images, names = pdf_to_images([tmp_path], page_filter)
+        finally:
+            os.unlink(tmp_path)
+    else:
+        images, names = pdf_to_images(files, page_filter)
 
     if not images:
         click.echo("No pages to print.", err=True)
