@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-import argparse
 import os
 import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
-from .printer import (
-    CHAR_WIDTH,
-    cat_files,
-    connect_printer,
-    count_lines,
-    print_text,
-)
+import click
+from PIL import Image
+
+from .printer import CHAR_WIDTH, cat_files, connect_printer, count_lines, print_text
 from .shell import run_shell_commands
 
 
@@ -32,165 +28,120 @@ class ImageProcessingConfig:
     spacing: int = 1
 
 
-def add_image_processing_args(parser):
-    """Add common image processing arguments to a parser"""
-    parser.add_argument(
+def parse_comma_separated(value, converter, validator=None):
+    """Helper to parse comma-separated values with optional validation"""
+    if not value:
+        return []
+    items = [converter(x.strip()) for x in value.split(",")]
+    if validator:
+        for item in items:
+            if not validator(item):
+                raise click.BadParameter(f"Invalid value: {item}")
+    return items
+
+
+def validate_method(value):
+    return value.lower() in {"raster", "column", "graphics"}
+
+
+def validate_dither(value):
+    return value is None or value.lower() in {"none", "thresh", "floyd", "atkinson"}
+
+
+def validate_threshold(value):
+    return 0.0 <= value <= 1.0
+
+
+def validate_diffusion(value):
+    return value >= 0.0
+
+
+# Common image processing options
+image_options = [
+    click.option(
         "--scale", default="1.0", help="Comma-separated floats for per-image scale."
-    )
-    parser.add_argument(
+    ),
+    click.option(
         "--align",
         default="center",
         help="Comma-separated: left,right,center,p-center,l-top,l-bottom,l-center.",
-    )
-    parser.add_argument(
+    ),
+    click.option(
         "--method", default="raster", help="Comma-separated: raster,column,graphics."
-    )
-    parser.add_argument(
+    ),
+    click.option(
         "--timestamp",
         default="none",
         help="strftime string or 'none' to skip timestamp.",
-    )
-    parser.add_argument("--dither", help="Comma-separated: none,thresh,floyd,atkinson.")
-    parser.add_argument(
+    ),
+    click.option("--dither", help="Comma-separated: none,thresh,floyd,atkinson."),
+    click.option(
         "--threshold",
         default="0.5",
         help="Comma-separated cutoff 0–1 for thresh/diffusion.",
-    )
-    parser.add_argument(
+    ),
+    click.option(
         "--diffusion",
         default="1.0",
         help="Comma-separated diffusion strength (0=no spread,1=classic).",
-    )
-    parser.add_argument("--heading", help="Optional heading before images.")
-    parser.add_argument(
-        "--caption",
-        help="Comma-separated list of per-image captions.",
-    )
-    parser.add_argument(
-        "--footer",
-        help="Global footer text to print after all images.",
-    )
-    parser.add_argument(
+    ),
+    click.option("--heading", help="Optional heading before images."),
+    click.option("--caption", help="Comma-separated list of per-image captions."),
+    click.option("--footer", help="Global footer text to print after all images."),
+    click.option(
         "--spacing", type=int, default=1, help="Blank lines between each image."
-    )
-    parser.add_argument(
-        "--debug", action="store_true", help="Emit per-image debug info."
-    )
+    ),
+    click.option("--debug", is_flag=True, help="Emit per-image debug info."),
+]
 
 
-def parse_and_validate_image_args(args) -> ImageProcessingConfig:
-    """Parse and validate common image processing arguments, return ImageProcessingConfig"""
-    scales = [float(x) for x in args.scale.split(",")]
-    aligns = [a.strip().lower() for a in args.align.split(",")]
-    methods = [m.strip().lower() for m in args.method.split(",")]
+def add_image_options(func):
+    """Decorator to add all image processing options to a command"""
+    for option in reversed(image_options):
+        func = option(func)
+    return func
+
+
+def create_image_config(**kwargs) -> ImageProcessingConfig:
+    """Create ImageProcessingConfig from click arguments"""
+    scales = parse_comma_separated(kwargs["scale"], float)
+    aligns = parse_comma_separated(kwargs["align"], str)
+    methods = parse_comma_separated(kwargs["method"], str)
     dithers = (
-        [d.strip().lower() for d in args.dither.split(",")] if args.dither else [None]
+        parse_comma_separated(kwargs["dither"], str) if kwargs["dither"] else [None]
     )
-    thresholds = [float(x) for x in args.threshold.split(",")]
-    diffusions = [float(x) for x in args.diffusion.split(",")]
+    thresholds = parse_comma_separated(kwargs["threshold"], float)
+    diffusions = parse_comma_separated(kwargs["diffusion"], float)
 
     # Validation
-    if any(m not in {"raster", "column", "graphics"} for m in methods):
-        sys.stderr.write("--method must be raster|column|graphics\n")
-        sys.exit(1)
-    if any(d not in {None, "none", "thresh", "floyd", "atkinson"} for d in dithers):
-        sys.stderr.write("--dither invalid\n")
-        sys.exit(1)
-    if any(not (0.0 <= t <= 1.0) for t in thresholds):
-        sys.stderr.write("--threshold values must be 0–1\n")
-        sys.exit(1)
-    if any(d < 0 for d in diffusions):
-        sys.stderr.write("--diffusion must be >= 0\n")
-        sys.exit(1)
+    if not all(validate_method(m) for m in methods):
+        raise click.BadParameter("--method must be raster|column|graphics")
+    if not all(validate_dither(d) for d in dithers):
+        raise click.BadParameter("--dither invalid")
+    if not all(validate_threshold(t) for t in thresholds):
+        raise click.BadParameter("--threshold values must be 0–1")
+    if not all(validate_diffusion(d) for d in diffusions):
+        raise click.BadParameter("--diffusion must be >= 0")
 
-    ts_fmt = None if args.timestamp.lower() == "none" else args.timestamp
-    captions_str = args.caption if hasattr(args, "caption") else None
-    footer_text = args.footer if hasattr(args, "footer") else None
+    ts_fmt = None if kwargs["timestamp"].lower() == "none" else kwargs["timestamp"]
 
     return ImageProcessingConfig(
         scales=scales,
-        aligns=aligns,
-        methods=methods,
-        dithers=dithers,
+        aligns=[a.lower() for a in aligns],
+        methods=[m.lower() for m in methods],
+        dithers=[d.lower() if d and d != "none" else None for d in dithers],
         thresholds=thresholds,
         diffusions=diffusions,
         ts_fmt=ts_fmt,
-        captions_str=captions_str,
-        footer_text=footer_text,
-        debug=args.debug,
-        spacing=args.spacing,
+        captions_str=kwargs["caption"],
+        footer_text=kwargs["footer"],
+        debug=kwargs["debug"],
+        spacing=kwargs["spacing"],
     )
 
 
-def create_parser():
-    p = argparse.ArgumentParser(
-        description="Print text or images to a receipt printer."
-    )
-    subs = p.add_subparsers(dest="command", help="Subcommands")
-
-    # echo
-    echo = subs.add_parser("echo", help="Print literal text.")
-    echo.add_argument("text", nargs="+", help="Text to print.")
-    echo.add_argument(
-        "-l",
-        "--lines",
-        action="store_true",
-        help="Join args with newlines instead of spaces.",
-    )
-
-    # cat
-    cat = subs.add_parser("cat", help="Print files' contents.")
-    cat.add_argument("files", nargs="+", help="Files to print.")
-
-    # count
-    cnt = subs.add_parser("count", help="Count printed lines.")
-    cnt.add_argument("files", nargs="*", help="Files to count; omit for stdin.")
-
-    # shell
-    sh = subs.add_parser("shell", help="Run shell commands and print output.")
-    sh.add_argument("commands", nargs="+", help="Commands to run.")
-    sh.add_argument(
-        "--no-wrap", action="store_true", help="Standard capture instead of PTY wrap."
-    )
-
-    # image
-    img = subs.add_parser("image", help="Print one or more images.")
-    img.add_argument(
-        "files", nargs="*", help="Image files or directories; omit for stdin."
-    )
-    add_image_processing_args(img)
-
-    # pdf
-    pdf = subs.add_parser("pdf", help="Print PDF files.")
-    pdf.add_argument("files", nargs="*", help="PDF files; omit for stdin")
-    pdf.add_argument(
-        "--format",
-        choices=["image", "text"],
-        default="image",
-        help="Render as images or markdown text",
-    )
-
-    # Page selection - mutually exclusive
-    page_group = pdf.add_mutually_exclusive_group()
-    page_group.add_argument(
-        "--range", help="Page range: '1,5' (pages 1-5), '5,-1' (page 5 to end)"
-    )
-    page_group.add_argument(
-        "--pages", help="Specific pages: '1,2,5' (pages 1, 2, and 5)"
-    )
-
-    add_image_processing_args(pdf)
-
-    # action
-    action = subs.add_parser("action", help="Perform printer actions.")
-    act_subs = action.add_subparsers(dest="action_command", help="Action")
-    act_subs.add_parser("cut", help="Cut the paper.")
-
-    return p
-
-
-def _print_with_images(config: ImageProcessingConfig, images, names=None, heading=None):
-    """Shared helper to print images with common workflow"""
+def print_with_images(config: ImageProcessingConfig, images, names=None, heading=None):
+    """Print images with common workflow"""
     printer = connect_printer()
 
     if heading:
@@ -221,12 +172,133 @@ def _print_with_images(config: ImageProcessingConfig, images, names=None, headin
     printer.close()
 
 
-def _parse_page_filter(args):
-    """Parse page selection arguments into filter tuple"""
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """Print text or images to a receipt printer."""
+    if ctx.invoked_subcommand is None:
+        if not sys.stdin.isatty():
+            print_text(sys.stdin.read())
+        else:
+            click.echo(ctx.get_help())
+            sys.exit(1)
+
+
+@cli.command()
+@click.argument("text", nargs=-1, required=True)
+@click.option(
+    "-l", "--lines", is_flag=True, help="Join args with newlines instead of spaces."
+)
+def echo(text, lines):
+    """Print literal text."""
+    txt = "\n".join(text) if lines else " ".join(text)
+    print_text(txt)
+
+
+@cli.command()
+@click.argument("files", nargs=-1, required=True)
+def cat(files):
+    """Print files' contents."""
+    cat_files(files)
+
+
+@cli.command()
+@click.argument("files", nargs=-1)
+def count(files):
+    """Count printed lines."""
+    if files:
+        buf = ""
+        for f in files:
+            try:
+                buf += open(f).read()
+            except Exception as e:
+                click.echo(f"Error reading {f}: {e}", err=True)
+                sys.exit(1)
+    else:
+        if not sys.stdin.isatty():
+            buf = sys.stdin.read()
+        else:
+            click.echo("No input provided for counting.", err=True)
+            sys.exit(1)
+    click.echo(count_lines(buf, CHAR_WIDTH))
+
+
+@cli.command()
+@click.argument("commands", nargs=-1, required=True)
+@click.option("--no-wrap", is_flag=True, help="Standard capture instead of PTY wrap.")
+def shell(commands, no_wrap):
+    """Run shell commands and print output."""
+    out = run_shell_commands(commands, wrap_tty=not no_wrap, columns=CHAR_WIDTH)
+    print_text(out)
+
+
+@cli.command()
+@click.argument("files", nargs=-1)
+@add_image_options
+def image(files, **kwargs):
+    """Print one or more images."""
+    if not files:
+        if not sys.stdin.isatty():
+            files = [p for p in sys.stdin.read().split() if p]
+        else:
+            click.echo("No image paths provided.", err=True)
+            sys.exit(1)
+
+    # Collect image files
+    exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
+    img_files = []
+    for p in files:
+        if os.path.isdir(p):
+            for e in sorted(os.listdir(p)):
+                if e.lower().endswith(exts):
+                    img_files.append(os.path.join(p, e))
+        else:
+            if not os.path.isfile(p):
+                click.echo(f"missing file: {p}", err=True)
+                sys.exit(1)
+            if not p.lower().endswith(exts):
+                click.echo(f"unsupported file type: {p}", err=True)
+                sys.exit(1)
+            img_files.append(p)
+
+    if not img_files:
+        click.echo("No usable images found.", err=True)
+        sys.exit(1)
+
+    images = [Image.open(f) for f in img_files]
+    config = create_image_config(**kwargs)
+    print_with_images(config, images, names=img_files, heading=kwargs["heading"])
+
+
+@cli.command()
+@click.argument("files", nargs=-1)
+@click.option(
+    "--format",
+    type=click.Choice(["image", "text"]),
+    default="image",
+    help="Render as images or markdown text",
+)
+@click.option("--range", help="Page range: '1,5' (pages 1-5), '5,-1' (page 5 to end)")
+@click.option("--pages", help="Specific pages: '1,2,5' (pages 1, 2, and 5)")
+@add_image_options
+def pdf(files, format, range, pages, **kwargs):
+    """Print PDF files."""
+    if not files:
+        if not sys.stdin.isatty():
+            files = [p for p in sys.stdin.read().split() if p]
+        else:
+            click.echo("No PDF paths provided.", err=True)
+            sys.exit(1)
+
+    # Parse page filter
     page_filter = None
-    if args.range:
+    if range and pages:
+        click.echo("Cannot specify both --range and --pages", err=True)
+        sys.exit(1)
+
+    if range:
         try:
-            parts = args.range.split(",")
+            parts = range.split(",")
             if len(parts) != 2:
                 raise ValueError("Range must be two comma-separated values")
             start, end = parts
@@ -236,141 +308,53 @@ def _parse_page_filter(args):
                 raise ValueError("Start page must be >= 1")
             page_filter = ("range", start, end)
         except ValueError as e:
-            sys.stderr.write(f"Invalid --range: {e}\n")
+            click.echo(f"Invalid --range: {e}", err=True)
             sys.exit(1)
-    elif args.pages:
+    elif pages:
         try:
-            pages = [int(p) for p in args.pages.split(",")]
-            if any(p < 1 for p in pages):
+            page_list = [int(p) for p in pages.split(",")]
+            if any(p < 1 for p in page_list):
                 raise ValueError("Page numbers must be >= 1")
-            page_filter = ("pages", pages)
+            page_filter = ("pages", page_list)
         except ValueError as e:
-            sys.stderr.write(f"Invalid --pages: {e}\n")
-            sys.exit(1)
-    return page_filter
-
-
-def _handle_image_based_command(args):
-    """Unified handler for image and PDF commands"""
-    if not args.files:
-        if not sys.stdin.isatty():
-            args.files = [p for p in sys.stdin.read().split() if p]
-        else:
-            cmd_type = "image" if args.command == "image" else "PDF"
-            sys.stderr.write(f"No {cmd_type} paths provided.\n")
+            click.echo(f"Invalid --pages: {e}", err=True)
             sys.exit(1)
 
-    if args.command == "image":
+    if format == "text":
+        from .pdf_utils import pdf_to_text
 
-        def collect(paths):
-            exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
-            out = []
-            for p in paths:
-                if os.path.isdir(p):
-                    for e in sorted(os.listdir(p)):
-                        if e.lower().endswith(exts):
-                            out.append(os.path.join(p, e))
-                else:
-                    if not os.path.isfile(p):
-                        sys.stderr.write(f"missing file: {p}\n")
-                        sys.exit(1)
-                    if not p.lower().endswith(exts):
-                        sys.stderr.write(f"unsupported file type: {p}\n")
-                        sys.exit(1)
-                    out.append(p)
-            return out
-
-        img_files = collect(args.files)
-        if not img_files:
-            sys.stderr.write("No usable images found.\n")
-            sys.exit(1)
-
-        from PIL import Image
-
-        images = [Image.open(f) for f in img_files]
-        names = img_files
-
-    elif args.command == "pdf":
-        page_filter = _parse_page_filter(args)
-
-        if args.format == "text":
-            from .pdf_utils import pdf_to_text
-
-            txt = pdf_to_text(args.files, page_filter)
-            print_text(txt)
-            return
-
-        from .pdf_utils import pdf_to_images
-
-        images, names = pdf_to_images(args.files, page_filter)
-
-        if not images:
-            sys.stderr.write("No pages to print.\n")
-            return
-
-    config = parse_and_validate_image_args(args)
-    _print_with_images(config, images, names=names, heading=args.heading)
-
-
-def main():
-    parser = create_parser()
-    args = parser.parse_args()
-
-    if args.command is None:
-        if not sys.stdin.isatty():
-            print_text(sys.stdin.read())
-        else:
-            parser.print_help()
-            sys.exit(1)
-        return
-
-    if args.command == "echo":
-        txt = "\n".join(args.text) if args.lines else " ".join(args.text)
+        txt = pdf_to_text(files, page_filter)
         print_text(txt)
         return
 
-    if args.command == "cat":
-        cat_files(args.files)
+    from .pdf_utils import pdf_to_images
+
+    images, names = pdf_to_images(files, page_filter)
+
+    if not images:
+        click.echo("No pages to print.", err=True)
         return
 
-    if args.command == "count":
-        if args.files:
-            buf = ""
-            for f in args.files:
-                try:
-                    buf += open(f).read()
-                except Exception as e:
-                    sys.stderr.write(f"Error reading {f}: {e}\n")
-                    sys.exit(1)
-        else:
-            if not sys.stdin.isatty():
-                buf = sys.stdin.read()
-            else:
-                sys.stderr.write("No input provided for counting.\n")
-                sys.exit(1)
-        print(count_lines(buf, CHAR_WIDTH))
-        return
+    config = create_image_config(**kwargs)
+    print_with_images(config, images, names=names, heading=kwargs["heading"])
 
-    if args.command == "shell":
-        out = run_shell_commands(
-            args.commands, wrap_tty=not args.no_wrap, columns=CHAR_WIDTH
-        )
-        print_text(out)
-        return
 
-    if args.command in ("image", "pdf"):
-        _handle_image_based_command(args)
-        return
+@cli.group()
+def action():
+    """Perform printer actions."""
+    pass
 
-    if args.command == "action":
-        if args.action_command == "cut":
-            p = connect_printer()
-            p.cut()
-            p.close()
-        else:
-            sys.stderr.write("Invalid action command.\n")
-            sys.exit(1)
-        return
+
+@action.command()
+def cut():
+    """Cut the paper."""
+    p = connect_printer()
+    p.cut()
+    p.close()
+
+
+def main():
+    cli()
 
 
 if __name__ == "__main__":

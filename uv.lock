@@ -956,6 +956,7 @@ name = "receipt-print"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "markitdown", extra = ["all"] },
     { name = "numpy" },
     { name = "pdf2image" },
@@ -965,6 +966,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.2.1" },
     { name = "markitdown", extras = ["all"], specifier = ">=0.1.0" },
     { name = "numpy", specifier = ">=2.2.5" },
     { name = "pdf2image", specifier = ">=1.17.0" },
