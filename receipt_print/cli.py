@@ -189,7 +189,7 @@ def cli(ctx):
 @click.option(
     "-l", "--lines", is_flag=True, help="Join args with newlines instead of spaces."
 )
-def echo(text, lines):
+def text(text, lines):
     """Print literal text."""
     txt = "\n".join(text) if lines else " ".join(text)
     print_text(txt)

@@ -19,8 +19,8 @@ cat file.txt | receipt-print
 
 Print text:
 ```bash
-receipt-print echo "hello" "world"
-receipt-print echo -l "line 1" "line 2"  # use newlines instead of spaces
+receipt-print text "hello" "world"
+receipt-print text -l "line 1" "line 2"  # use newlines instead of spaces
 ```
 
 Print file content:
