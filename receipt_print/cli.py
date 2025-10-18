@@ -205,11 +205,17 @@ def text(text, lines):
 @click.option(
     "--qr-position",
     type=click.Choice(["top-left", "top-right", "bottom-left", "bottom-right"], case_sensitive=False),
-    default="bottom-left",
+    default="bottom-right",
     show_default=True,
     help="Placement for article QR codes.",
 )
-def wiki(urls, qr, qr_position):
+@click.option(
+    "--max-headings",
+    type=int,
+    default=None,
+    help="Maximum number of headings to print per article.",
+)
+def wiki(urls, qr, qr_position, max_headings):
     """Print one or more Wikipedia articles."""
 
     articles = []
@@ -219,7 +225,14 @@ def wiki(urls, qr, qr_position):
         except WikipediaError as exc:
             click.echo(f"Failed to load '{raw}': {exc}", err=True)
             sys.exit(1)
-    print_articles(articles, qr=qr, qr_position=qr_position.lower())
+    if max_headings is not None and max_headings < 0:
+        raise click.BadParameter("--max-headings must be >= 0")
+    print_articles(
+        articles,
+        qr=qr,
+        qr_position=qr_position.lower(),
+        max_headings=max_headings,
+    )
 
 
 @cli.command()

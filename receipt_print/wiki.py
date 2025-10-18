@@ -235,6 +235,28 @@ def _normalize_block(text: str) -> str:
 _HEADING_LINE_RE = re.compile(r"^#{1,6}\s")
 
 
+def _limit_heading_lines(
+    text: str,
+    remaining: Optional[int],
+    exhausted: bool,
+) -> Tuple[str, Optional[int], bool]:
+    if remaining is None or exhausted:
+        return text, remaining, exhausted
+    rem = max(remaining, 0)
+    lines_out: List[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if _HEADING_LINE_RE.match(stripped):
+            if rem <= 0:
+                exhausted = True
+                break
+            rem -= 1
+            lines_out.append(line)
+        else:
+            lines_out.append(line)
+    return "\n".join(lines_out), rem, exhausted
+
+
 def _render_inline(node, ref_manager: Optional[_ReferenceManager]) -> str:
     if isinstance(node, NavigableString):
         return str(node)
@@ -504,12 +526,17 @@ def _print_text(printer, text: str) -> None:
 
 def _print_qr(printer, url: str, position: str) -> None:
     align = "left" if position.endswith("left") else "right"
-    printer.set(align=align)
-    printer.qr(url, size=6)
-    printer.set(align="left")
+    printer.set(align=align, normal_textsize=True, double_width=False, double_height=False)
+    printer.qr(url, size=4)
+    printer.set(align="left", normal_textsize=True, double_width=False, double_height=False)
 
 
-def print_articles(articles: Iterable[WikiArticle], qr: bool, qr_position: str) -> None:
+def print_articles(
+    articles: Iterable[WikiArticle],
+    qr: bool,
+    qr_position: str,
+    max_headings: Optional[int] = None,
+) -> None:
     from .printer import (
         CHAR_WIDTH,
         DOTS_PER_LINE,
@@ -531,6 +558,8 @@ def print_articles(articles: Iterable[WikiArticle], qr: bool, qr_position: str) 
         total_lines = 0
 
         for idx, article in enumerate(article_list):
+            heading_remaining = max_headings if max_headings is not None else None
+            heading_limit_reached = False
             if idx:
                 plan.append(("blank",))
                 total_lines += 1
@@ -539,6 +568,8 @@ def print_articles(articles: Iterable[WikiArticle], qr: bool, qr_position: str) 
             heading_text = sanitize_output(heading_value)
             plan.append(("header", heading_text))
             total_lines += count_lines(heading_text, CHAR_WIDTH)
+            if heading_remaining is not None and heading_remaining > 0:
+                heading_remaining = max(heading_remaining - 1, 0)
 
             top = qr and qr_pos.startswith("top")
             bottom = qr and qr_pos.startswith("bottom")
@@ -548,10 +579,19 @@ def print_articles(articles: Iterable[WikiArticle], qr: bool, qr_position: str) 
                 total_lines += 1
 
             for segment in article.segments:
+                if heading_limit_reached:
+                    break
                 if segment.kind == "text" and segment.text:
-                    sanitized_text = sanitize_output(segment.text)
-                    plan.append(("text", sanitized_text))
-                    total_lines += count_lines(sanitized_text, CHAR_WIDTH) + 1
+                    segment_text = segment.text
+                    limited_text, heading_remaining, exhausted = _limit_heading_lines(
+                        segment_text, heading_remaining, heading_limit_reached
+                    )
+                    if exhausted:
+                        heading_limit_reached = True
+                    sanitized_text = sanitize_output(limited_text)
+                    if sanitized_text:
+                        plan.append(("text", sanitized_text))
+                        total_lines += count_lines(sanitized_text, CHAR_WIDTH) + 1
                 elif segment.kind == "image" and segment.image_url:
                     try:
                         image = _load_image(segment.image_url)
@@ -570,7 +610,19 @@ def print_articles(articles: Iterable[WikiArticle], qr: bool, qr_position: str) 
             if bottom:
                 plan.append(("blank",))
                 total_lines += 1
+                if heading_limit_reached:
+                    plan.append(("ellipsis", "..."))
+                    total_lines += 1
+                    plan.append(("blank",))
+                    total_lines += 1
                 plan.append(("qr", article.url, qr_pos))
+            elif heading_limit_reached:
+                plan.append(("blank",))
+                total_lines += 1
+                plan.append(("ellipsis", "..."))
+                total_lines += 1
+                plan.append(("blank",))
+                total_lines += 1
 
         if total_lines > MAX_LINES:
             try:
@@ -613,6 +665,19 @@ def print_articles(articles: Iterable[WikiArticle], qr: bool, qr_position: str) 
                 _print_qr(printer, action[1], action[2])
             elif kind == "text":
                 _print_text(printer, action[1])
+            elif kind == "ellipsis":
+                printer.set(align="center", normal_textsize=True, bold=True)
+                printer.text(action[1] + "\n")
+                printer.set(
+                    align="left",
+                    font="a",
+                    bold=False,
+                    width=1,
+                    height=1,
+                    double_height=False,
+                    double_width=False,
+                    normal_textsize=True,
+                )
             elif kind == "image":
                 _print_image(printer, action[1], action[2])
 
