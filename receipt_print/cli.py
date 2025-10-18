@@ -12,6 +12,7 @@ from PIL import Image
 
 from .printer import CHAR_WIDTH, cat_files, connect_printer, count_lines, print_text
 from .shell import run_shell_commands
+from .wiki import WikipediaError, load_article, print_articles
 
 
 @dataclass
@@ -196,6 +197,29 @@ def text(text, lines):
     """Print literal text."""
     txt = "\n".join(text) if lines else " ".join(text)
     print_text(txt)
+
+
+@cli.command()
+@click.argument("urls", nargs=-1, required=True)
+@click.option("--qr/--no-qr", default=True, help="Include article QR codes.")
+@click.option(
+    "--qr-position",
+    type=click.Choice(["top-left", "top-right", "bottom-left", "bottom-right"], case_sensitive=False),
+    default="bottom-left",
+    show_default=True,
+    help="Placement for article QR codes.",
+)
+def wiki(urls, qr, qr_position):
+    """Print one or more Wikipedia articles."""
+
+    articles = []
+    for raw in urls:
+        try:
+            articles.append(load_article(raw))
+        except WikipediaError as exc:
+            click.echo(f"Failed to load '{raw}': {exc}", err=True)
+            sys.exit(1)
+    print_articles(articles, qr=qr, qr_position=qr_position.lower())
 
 
 @cli.command()
