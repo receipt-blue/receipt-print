@@ -42,7 +42,7 @@ from .arena import (
     should_include_block,
     video_frame_from_bytes,
 )
-from .printer import CHAR_WIDTH, cat_files, connect_printer, count_lines, print_text
+from .printer import CHAR_WIDTH, cat_files, connect_printer, count_lines, print_text, sanitize_output
 from .shell import run_shell_commands
 
 
@@ -89,6 +89,12 @@ WS_CLEANER = re.compile(r"\s{2,}")
 
 def collapse_spaces(value: str) -> str:
     return WS_CLEANER.sub(" ", value).strip()
+
+
+def clean_heading_text(value: str) -> str:
+    return collapse_spaces(
+        sanitize_output(value or "").encode("ascii", "ignore").decode("ascii")
+    )
 
 
 def parse_comma_separated(value, converter, validator=None):
@@ -491,13 +497,18 @@ def print_arena_block(
     return content_printed
 
 
-def compute_channel_heading(meta: Optional[Dict[str, Any]]) -> str:
+def compute_channel_heading(meta: Optional[Dict[str, Any]]) -> List[str]:
     if not meta:
-        return ""
-    title = meta.get("title") or "Untitled Channel"
+        return []
+    title = clean_heading_text(meta.get("title") or "Untitled Channel")
     user = meta.get("user") or {}
-    user_name = user.get("full_name") or user.get("username") or "Unknown"
-    return f"{user_name} / {title}"
+    user_name = clean_heading_text(
+        user.get("full_name") or user.get("username") or "Unknown"
+    )
+    combined = f"{user_name} / {title}".strip()
+    if len(combined) <= HEADING_CHAR_WIDTH:
+        return [combined]
+    return [f"{user_name} /", title]
 
 
 def print_with_images(config: ImageProcessingConfig, images, names=None, heading=None):
@@ -926,8 +937,14 @@ def arena_channel(
         sys.exit(1)
 
     channel_url = canonical_channel_url(ref, meta_preview)
-    heading_text = heading if heading is not None else compute_channel_heading(meta_preview)
-    heading_text = collapse_spaces(heading_text.encode("ascii", "ignore").decode("ascii"))
+    if heading is not None:
+        heading_lines = [
+            collapse_spaces(part)
+            for part in heading.splitlines()
+            if part.strip()
+        ]
+    else:
+        heading_lines = compute_channel_heading(meta_preview)
 
     printer = connect_printer()
     job = ArenaPrintJob(
@@ -975,8 +992,8 @@ def arena_channel(
             if since_dt and (not added_dt or added_dt < since_dt):
                 continue
 
-            if not heading_printed and heading_text:
-                job.print_heading(heading_text, trailing_blank=True)
+            if not heading_printed and heading_lines:
+                job.print_heading(heading_lines, trailing_blank=True)
                 heading_printed = True
 
 
@@ -1131,3 +1148,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+HEADING_CHAR_WIDTH = max(1, CHAR_WIDTH // 2)

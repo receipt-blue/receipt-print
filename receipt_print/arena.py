@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 from urllib.parse import quote, unquote, urlparse
 
 import requests
@@ -466,13 +466,35 @@ class ArenaPrintJob:
         self.caption_index = 0
         self._footer_printed = False
 
-    def print_heading(self, text: str, double: bool = True, trailing_blank: bool = False) -> None:
-        if not text:
+    def print_heading(
+        self,
+        text: Union[str, Iterable[str]],
+        double: bool = True,
+        trailing_blank: bool = False,
+    ) -> None:
+        if text is None:
             return
-        self.printer.set(
-            align="left", font="b", bold=True, double_width=double, double_height=double
-        )
-        self.printer.text(ensure_trailing_newline(sanitize_output(text)))
+        if isinstance(text, str):
+            raw_lines = text.splitlines()
+        else:
+            raw_lines = list(text)
+        lines = [
+            sanitize_output(line).encode("ascii", "ignore").decode("ascii")
+            for line in raw_lines
+            if line
+        ]
+        if not lines:
+            return
+        for idx, line in enumerate(lines):
+            self.printer.set(
+                align="left",
+                font="b",
+                bold=True,
+                double_width=double,
+                double_height=double,
+                normal_textsize=True,
+            )
+            self.printer.text(ensure_trailing_newline(line))
         self.printer.set(
             align="left",
             font="a",
@@ -482,7 +504,7 @@ class ArenaPrintJob:
             normal_textsize=True,
         )
         if trailing_blank:
-            self.printer.text("\n\n")
+            self.printer.text("\n")
 
     def print_center_bold(self, text: str) -> None:
         if not text:
