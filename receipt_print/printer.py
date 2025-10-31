@@ -51,6 +51,23 @@ def count_lines(text: str, width: int) -> int:
     return total
 
 
+def enforce_line_limit(n: int) -> None:
+    """Ensure the line count does not exceed the maximum without confirmation."""
+    if n <= MAX_LINES:
+        return
+    try:
+        with open("/dev/tty") as tty:
+            sys.stdout.write(
+                f"Warning: {n} lines > limit {MAX_LINES}. Continue? [y/N] "
+            )
+            sys.stdout.flush()
+            if tty.readline().strip().lower() not in ("y", "yes"):
+                sys.exit(1)
+    except Exception:
+        sys.stderr.write("No TTY available; aborting.\n")
+        sys.exit(1)
+
+
 def connect_printer():
     """connect to the ESC/POS printer"""
     skip_usb = os.getenv("RP_NO_USB", "0") == "1"
@@ -88,18 +105,7 @@ def print_text(text: str):
     """print arbitrary text with line-limit warnings"""
     text = sanitize_output(text)
     n = count_lines(text, CHAR_WIDTH)
-    if n > MAX_LINES:
-        try:
-            with open("/dev/tty") as tty:
-                sys.stdout.write(
-                    f"Warning: {n} lines > limit {MAX_LINES}. Continue? [y/N] "
-                )
-                sys.stdout.flush()
-                if tty.readline().strip().lower() not in ("y", "yes"):
-                    sys.exit(1)
-        except Exception:
-            sys.stderr.write("No TTY available; aborting.\n")
-            sys.exit(1)
+    enforce_line_limit(n)
 
     printer = connect_printer()
     printer.set(align="left", font="a")

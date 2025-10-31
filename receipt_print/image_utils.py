@@ -11,6 +11,21 @@ from PIL import Image
 
 from .printer import DOTS_PER_LINE, MAX_LINES
 
+
+def parse_caption_csv(captions_str: Optional[str]) -> List[str]:
+    """Parse a caption CSV string into a list of strings."""
+    if not captions_str:
+        return []
+    try:
+        reader = csv.reader(io.StringIO(captions_str))
+        captions = next(reader, [])
+        return [c.strip() for c in captions]
+    except Exception as e:
+        sys.stderr.write(
+            f"Warning: Could not parse --caption string '{captions_str}': {e}\n"
+        )
+        return []
+
 # error-diffusion kernels (weights sum to 1)
 ATKINSON_KERNEL = [
     (+1, 0, 1 / 8),
@@ -93,23 +108,19 @@ def print_images_from_pil(
     threshold_list: List[float],
     diffusion_list: List[float],
     captions_str: Optional[str] = None,
+    captions_list: Optional[List[str]] = None,
+    caption_start: int = 0,
     footer_text: Optional[str] = None,
     debug: bool = False,
     spacing: int = 1,
     names: Optional[Iterable[str]] = None,
-) -> None:
-    """print pre-loaded PIL images"""
+) -> int:
+    """print pre-loaded PIL images and return next caption index"""
 
-    parsed_captions_list: List[str] = []
-    if captions_str:
-        try:
-            reader = csv.reader(io.StringIO(captions_str))
-            parsed_captions_list = next(reader, [])
-            parsed_captions_list = [c.strip() for c in parsed_captions_list]
-        except Exception as e:
-            sys.stderr.write(
-                f"Warning: Could not parse --caption string '{captions_str}': {e}\n"
-            )
+    if captions_list is not None:
+        parsed_captions_list: List[str] = captions_list[:]
+    else:
+        parsed_captions_list = parse_caption_csv(captions_str)
 
     img_list = list(images)
     name_list = (
@@ -208,10 +219,18 @@ def print_images_from_pil(
         try:
             printer.image(img_source=img2, center=center, impl=impl)
 
-            if idx < len(parsed_captions_list) and parsed_captions_list[idx]:
+            caption_idx = caption_start + idx
+            caption_text = None
+            if parsed_captions_list:
+                if caption_idx < len(parsed_captions_list):
+                    caption_text = parsed_captions_list[caption_idx]
+                else:
+                    caption_text = parsed_captions_list[-1]
+
+            if caption_text:
                 printer.text("\n")
                 printer.set(align="center", font="b", bold=True)
-                printer.text(parsed_captions_list[idx] + "\n")
+                printer.text(caption_text + "\n")
                 printer.set(align="left")
                 if idx < len(processed) - 1:
                     printer.text("\n")
@@ -230,6 +249,8 @@ def print_images_from_pil(
         printer.text(footer_text + "\n")
         printer.set(align="left")
 
+    return caption_start + len(processed)
+
 
 def print_images(
     printer,
@@ -247,16 +268,7 @@ def print_images(
     spacing: int = 1,
 ):
     # parsed captions (per-image)
-    parsed_captions_list: List[str] = []
-    if captions_str:
-        try:
-            reader = csv.reader(io.StringIO(captions_str))
-            parsed_captions_list = next(reader, [])
-            parsed_captions_list = [c.strip() for c in parsed_captions_list]
-        except Exception as e:
-            sys.stderr.write(
-                f"Warning: Could not parse --caption string '{captions_str}': {e}\n"
-            )
+    parsed_captions_list: List[str] = parse_caption_csv(captions_str)
 
     # determine max width
     max_width = 576
@@ -358,10 +370,17 @@ def print_images(
         try:
             printer.image(img_source=img2, center=center, impl=impl)
 
-            if idx < len(parsed_captions_list) and parsed_captions_list[idx]:
+            caption_text = None
+            if parsed_captions_list:
+                if idx < len(parsed_captions_list):
+                    caption_text = parsed_captions_list[idx]
+                else:
+                    caption_text = parsed_captions_list[-1]
+
+            if caption_text:
                 printer.text("\n")
                 printer.set(align="center", font="b", bold=True)
-                printer.text(parsed_captions_list[idx] + "\n")
+                printer.text(caption_text + "\n")
                 printer.set(align="left")
                 if idx < len(processed) - 1:
                     printer.text("\n")
