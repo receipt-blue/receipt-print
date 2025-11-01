@@ -195,7 +195,9 @@ def canonical_block_url(block_id: str) -> str:
     return f"https://www.are.na/block/{block_id}"
 
 
-def canonical_channel_url(ref: ChannelRef, meta: Optional[Dict[str, Any]]) -> Optional[str]:
+def canonical_channel_url(
+    ref: ChannelRef, meta: Optional[Dict[str, Any]]
+) -> Optional[str]:
     if ref.slug and ref.user:
         return f"https://www.are.na/{ref.user}/{ref.slug}"
     if ref.original and ref.original.startswith("http"):
@@ -378,7 +380,9 @@ class ArenaClient:
     def fetch_block(self, block_id: str) -> Dict[str, Any]:
         return self._request_json(f"/blocks/{quote(block_id)}")
 
-    def fetch_channel_meta_by_slug(self, slug: str, page: int, per: int) -> Dict[str, Any]:
+    def fetch_channel_meta_by_slug(
+        self, slug: str, page: int, per: int
+    ) -> Dict[str, Any]:
         params = {"page": page, "per": per}
         return self._request_json(f"/channels/{quote(slug)}", params=params)
 
@@ -386,7 +390,9 @@ class ArenaClient:
         self, channel_id: str, page: int, per: int
     ) -> Dict[str, Any]:
         params = {"page": page, "per": per}
-        return self._request_json(f"/channels/{quote(channel_id)}/contents", params=params)
+        return self._request_json(
+            f"/channels/{quote(channel_id)}/contents", params=params
+        )
 
     def fetch_channel_meta_by_id(self, channel_id: str) -> Optional[Dict[str, Any]]:
         try:
@@ -411,7 +417,9 @@ class ChannelIterator:
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         while True:
             if self.ref.slug:
-                data = self.client.fetch_channel_meta_by_slug(self.ref.slug, self._page, self.per)
+                data = self.client.fetch_channel_meta_by_slug(
+                    self.ref.slug, self._page, self.per
+                )
                 if self.meta is None:
                     self.meta = data
                 contents = data.get("contents") or []
@@ -544,7 +552,9 @@ class ArenaPrintJob:
             normal_textsize=True,
         )
 
-    def print_text(self, text: str, *, align: str = "left", font: str = "a", bold: bool = False) -> None:
+    def print_text(
+        self, text: str, *, align: str = "left", font: str = "a", bold: bool = False
+    ) -> None:
         if not text:
             return
         sanitized = sanitize_output(text)
@@ -569,7 +579,9 @@ class ArenaPrintJob:
             normal_textsize=True,
         )
 
-    def print_images(self, images: Iterable[Image.Image], names: Optional[Iterable[str]] = None) -> None:
+    def print_images(
+        self, images: Iterable[Image.Image], names: Optional[Iterable[str]] = None
+    ) -> None:
         img_list = list(images)
         if not img_list:
             return

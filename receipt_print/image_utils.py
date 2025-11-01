@@ -26,6 +26,7 @@ def parse_caption_csv(captions_str: Optional[str]) -> List[str]:
         )
         return []
 
+
 # error-diffusion kernels (weights sum to 1)
 ATKINSON_KERNEL = [
     (+1, 0, 1 / 8),
@@ -194,7 +195,11 @@ def print_images_from_pil(
     for idx, img in enumerate(img_list):
         scale = float(get(scale_list, idx))
         al = get(align_list, idx).lower()
-        orient = "landscape" if auto_orient and img.width > img.height else desired_orientation(al)
+        orient = (
+            "landscape"
+            if auto_orient and img.width > img.height
+            else desired_orientation(al)
+        )
 
         im = img.copy()
         if orient == "landscape":
@@ -223,11 +228,23 @@ def print_images_from_pil(
             or not math.isclose(contrast_val, 1.0, rel_tol=1e-3)
             or not math.isclose(gamma_val, 1.0, rel_tol=1e-3)
         ):
-            im = preprocess_image(im, brightness_val, contrast_val, gamma_val, autocontrast)
+            im = preprocess_image(
+                im, brightness_val, contrast_val, gamma_val, autocontrast
+            )
 
         total_lines += math.ceil(im.height / DOTS_PER_LINE)
         processed.append(
-            (im, al, idx, name_list[idx], scale, orient, brightness_val, contrast_val, gamma_val)
+            (
+                im,
+                al,
+                idx,
+                name_list[idx],
+                scale,
+                orient,
+                brightness_val,
+                contrast_val,
+                gamma_val,
+            )
         )
 
     if total_lines > MAX_LINES:
@@ -243,7 +260,17 @@ def print_images_from_pil(
             sys.stderr.write("No TTY for confirm. Aborting.\n")
             sys.exit(1)
 
-    for im, al, idx, name, scale, orient, brightness_val, contrast_val, gamma_val in processed:
+    for (
+        im,
+        al,
+        idx,
+        name,
+        scale,
+        orient,
+        brightness_val,
+        contrast_val,
+        gamma_val,
+    ) in processed:
         method = get(method_list, idx)
         impl = impl_map[method]
         dith = get(dither_list, idx)

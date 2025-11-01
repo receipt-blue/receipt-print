@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -42,8 +43,97 @@ from .arena import (
     should_include_block,
     video_frame_from_bytes,
 )
-from .printer import CHAR_WIDTH, cat_files, connect_printer, count_lines, print_text, sanitize_output
+from .printer import (
+    CHAR_WIDTH,
+    cat_files,
+    connect_printer,
+    count_lines,
+    print_text,
+    sanitize_output,
+)
 from .shell import run_shell_commands
+
+
+class GroupedOption(click.Option):
+    def __init__(self, *args, group: Optional[str] = None, **kwargs):
+        self.group = group
+        super().__init__(*args, **kwargs)
+
+
+def _write_bold_section(formatter: click.HelpFormatter, title: str, records: List[tuple[str, str]]) -> None:
+    if not records:
+        return
+    formatter.write("\n")
+    formatter.write(click.style(title, bold=True) + "\n")
+    formatter.indent()
+    formatter.write_dl(records)
+    formatter.dedent()
+
+
+PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell"}
+
+
+class GroupedCommand(click.Command):
+    def format_options(self, ctx, formatter):
+        grouped: "OrderedDict[Optional[str], List[tuple[str, str]]]" = OrderedDict()
+        for param in self.get_params(ctx):
+            record = param.get_help_record(ctx)
+            if not record:
+                continue
+            group = getattr(param, "group", None)
+            if group not in grouped:
+                grouped[group] = []
+            grouped[group].append(record)
+
+        if not grouped:
+            return
+
+        for group, records in grouped.items():
+            if not records:
+                continue
+            section_name = (group or "Options").upper()
+            _write_bold_section(formatter, section_name, records)
+
+
+class GroupedGroup(click.Group):
+    command_class = GroupedCommand
+
+    def format_options(self, ctx, formatter):
+        option_records: List[tuple[str, str]] = []
+        for param in self.get_params(ctx):
+            record = param.get_help_record(ctx)
+            if record:
+                option_records.append(record)
+        _write_bold_section(formatter, "OPTIONS", option_records)
+
+        command_records: List[tuple[str, str]] = []
+        for subcommand in self.list_commands(ctx):
+            cmd = self.get_command(ctx, subcommand)
+            if cmd is None or cmd.hidden:
+                continue
+            if subcommand in PRINTING_COMMANDS:
+                group_name = "Print"
+            else:
+                group_name = "Utility"
+            command_records.append((group_name, subcommand, cmd.get_short_help_str()))
+
+        if not command_records:
+            return
+
+        groups: "OrderedDict[str, List[tuple[str, str]]]" = OrderedDict()
+        for group, name, help_str in command_records:
+            groups.setdefault(group, []).append((name, help_str))
+
+        for title, records in groups.items():
+            _write_bold_section(formatter, title.upper(), records)
+
+    def command(self, *args, **kwargs):
+        kwargs.setdefault("cls", self.command_class)
+        return super().command(*args, **kwargs)
+
+    def group(self, *args, **kwargs):
+        kwargs.setdefault("cls", type(self))
+        return super().group(*args, **kwargs)
 
 
 @dataclass
@@ -130,69 +220,147 @@ def validate_diffusion(value):
 
 
 # Common image processing options
-image_options = [
+def _apply_options(func, options):
+    for option in reversed(options):
+        func = option(func)
+    return func
+
+
+IMAGE_TUNING_GROUP = "image tuning"
+IMAGE_LAYOUT_GROUP = "layout"
+DIAGNOSTICS_GROUP = "diagnostics"
+OUTPUT_GROUP = "output control"
+VIDEO_GROUP = "video handling"
+PDF_GROUP = "PDF handling"
+ARENA_CONTENT_GROUP = "content filters"
+QR_GROUP = "QR codes"
+NETWORK_GROUP = "cache, networking"
+
+core_image_options = [
     click.option(
-        "--scale", default="1.0", help="Comma-separated floats for per-image scale."
+        "--method",
+        default="raster",
+        help="Comma-separated: raster,column,graphics.",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
     ),
     click.option(
-        "--align",
-        default="center",
-        help="Comma-separated: left,right,center,p-center,l-top,l-bottom,l-center.",
+        "--dither",
+        help="Comma-separated: none,thresh,floyd,atkinson.",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
     ),
-    click.option(
-        "--method", default="raster", help="Comma-separated: raster,column,graphics."
-    ),
-    click.option(
-        "--timestamp",
-        default="none",
-        help="strftime string or 'none' to skip timestamp.",
-    ),
-    click.option("--dither", help="Comma-separated: none,thresh,floyd,atkinson."),
     click.option(
         "--threshold",
         default="0.5",
         help="Comma-separated cutoff 0–1 for thresh/diffusion.",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
     ),
     click.option(
         "--diffusion",
         default="1.0",
         help="Comma-separated diffusion strength (0=no spread,1=classic).",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
     ),
     click.option(
         "--brightness",
         default="1.0",
         help="Comma-separated brightness multipliers (1.0=no change).",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
     ),
     click.option(
         "--contrast",
         default="1.0",
         help="Comma-separated contrast multipliers (1.0=no change).",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
     ),
     click.option(
         "--gamma",
         default="1.0",
         help="Comma-separated gamma values (<1 brightens, >1 darkens).",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
     ),
     click.option(
         "--autocontrast",
         is_flag=True,
         help="Apply auto-contrast before dithering.",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
     ),
-    click.option("--heading", help="Optional heading before images."),
-    click.option("--caption", help="Comma-separated list of per-image captions."),
-    click.option("--footer", help="Global footer text to print after all images."),
     click.option(
-        "--spacing", type=int, default=1, help="Blank lines between each image."
+        "--spacing",
+        type=int,
+        default=1,
+        help="Blank lines between each image.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
     ),
-    click.option("--debug", is_flag=True, help="Emit per-image debug info."),
+    click.option(
+        "--debug",
+        is_flag=True,
+        help="Emit per-image debug info.",
+        cls=GroupedOption,
+        group=DIAGNOSTICS_GROUP,
+    ),
 ]
 
 
+sugar_image_options = [
+    click.option(
+        "--scale",
+        default="1.0",
+        help="Comma-separated floats for per-image scale.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
+    ),
+    click.option(
+        "--align",
+        default="center",
+        help="Comma-separated: left,right,center,p-center,l-top,l-bottom,l-center.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
+    ),
+    click.option(
+        "--timestamp",
+        default="none",
+        help="strftime string or 'none' to skip timestamp.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
+    ),
+    click.option(
+        "--heading",
+        help="Optional heading before images.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
+    ),
+    click.option(
+        "--caption",
+        help="Comma-separated list of per-image captions.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
+    ),
+    click.option(
+        "--footer",
+        help="Global footer text to print after all images.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
+    ),
+]
+
+
+def add_core_image_options(func):
+    """Decorator to add common image tuning options"""
+    return _apply_options(func, core_image_options)
+
+
 def add_image_options(func):
-    """Decorator to add all image processing options to a command"""
-    for option in reversed(image_options):
-        func = option(func)
-    return func
+    """Decorator to add the full image option set to a command"""
+    return _apply_options(func, core_image_options + sugar_image_options)
 
 
 def create_image_config(**kwargs) -> ImageProcessingConfig:
@@ -326,7 +494,9 @@ def parse_pdf_options(
     return pdf_mode, page_filter
 
 
-def resolve_ffmpeg_path(video_mode: str, explicit: Optional[str]) -> Tuple[Optional[str], bool]:
+def resolve_ffmpeg_path(
+    video_mode: str, explicit: Optional[str]
+) -> Tuple[Optional[str], bool]:
     """Resolve ffmpeg binary path for video frame extraction."""
     if video_mode != "frame":
         return None, False
@@ -417,7 +587,9 @@ def gather_images_for_block(
                 names.append(url)
                 return images, names
             except ArenaDownloadError as exc:
-                sys.stderr.write(f"Warning: Could not load image attachment {url}: {exc}\n")
+                sys.stderr.write(
+                    f"Warning: Could not load image attachment {url}: {exc}\n"
+                )
         elif url and content_type.startswith("video/"):
             if media_opts.video_mode == "frame":
                 if media_opts.ffmpeg_path:
@@ -441,7 +613,9 @@ def gather_images_for_block(
                 data = client.download_media(url)
                 pdf_images = pdf_bytes_to_images(data, media_opts.pdf_page_filter)
                 if not pdf_images:
-                    sys.stderr.write(f"Warning: PDF attachment {url} yielded no pages.\n")
+                    sys.stderr.write(
+                        f"Warning: PDF attachment {url} yielded no pages.\n"
+                    )
                 else:
                     if (
                         media_opts.pdf_mode == "first"
@@ -449,14 +623,20 @@ def gather_images_for_block(
                     ):
                         pdf_images = pdf_images[:1]
                     images.extend(pdf_images)
-                    names.extend([f"{url}#page{i+1}" for i in range(len(pdf_images))])
+                    names.extend([f"{url}#page{i + 1}" for i in range(len(pdf_images))])
                     return images, names
             except ArenaDownloadError as exc:
                 sys.stderr.write(f"Warning: Could not download PDF {url}: {exc}\n")
         # other attachment types fall back to preview/text
 
     klass = block_class(block)
-    if (preview_urls and not images) or klass in {"image", "link", "media", "attachment", "channel"}:
+    if (preview_urls and not images) or klass in {
+        "image",
+        "link",
+        "media",
+        "attachment",
+        "channel",
+    }:
         preview_img, used_url = fetch_preview()
         if preview_img:
             images.append(preview_img)
@@ -479,7 +659,11 @@ def build_metadata_lines(
     modified_str = format_timestamp(parse_timestamp(block.get("updated_at")))
     if modified_str:
         lines.append(f"Modified: {modified_str}")
-    return [collapse_spaces(line.encode("ascii", "ignore").decode("ascii")) for line in lines if line]
+    return [
+        collapse_spaces(line.encode("ascii", "ignore").decode("ascii"))
+        for line in lines
+        if line
+    ]
 
 
 def print_arena_block(
@@ -511,11 +695,15 @@ def print_arena_block(
     elif images_only:
         return False
     elif klass == "text" and text_content:
-        text_content = collapse_spaces(LINK_PATTERN.sub(lambda m: m.group(1), text_content))
+        text_content = collapse_spaces(
+            LINK_PATTERN.sub(lambda m: m.group(1), text_content)
+        )
         job.print_text(text_content, align="left", font="a")
         content_printed = True
     elif text_content:
-        text_content = collapse_spaces(LINK_PATTERN.sub(lambda m: m.group(1), text_content))
+        text_content = collapse_spaces(
+            LINK_PATTERN.sub(lambda m: m.group(1), text_content)
+        )
         job.print_text(text_content, align="left", font="a")
         content_printed = True
 
@@ -534,7 +722,8 @@ def print_arena_block(
         if description:
             desc_clean = collapse_spaces(
                 LINK_PATTERN.sub(
-                    lambda m: m.group(1), description.encode("ascii", "ignore").decode("ascii")
+                    lambda m: m.group(1),
+                    description.encode("ascii", "ignore").decode("ascii"),
                 )
             )
             job.print_text(desc_clean, align="left", font="a", bold=False)
@@ -605,7 +794,7 @@ def print_with_images(config: ImageProcessingConfig, images, names=None, heading
     printer.close()
 
 
-@click.group(invoke_without_command=True)
+@click.group(cls=GroupedGroup, invoke_without_command=True)
 @click.pass_context
 def cli(ctx):
     """Print text or images to a receipt printer."""
@@ -722,7 +911,7 @@ def image(files, **kwargs):
     print_with_images(config, images, names=names, heading=kwargs["heading"])
 
 
-@cli.group(name="are.na")
+@cli.group(name="are.na", cls=GroupedGroup)
 def arena_group():
     """Interact with Are.na blocks and channels."""
     pass
@@ -730,49 +919,96 @@ def arena_group():
 
 @arena_group.command("block")
 @click.argument("blocks", nargs=-1, required=True)
-@click.option("--method", default="raster", help="Comma-separated: raster,column,graphics.")
-@click.option("--dither", help="Comma-separated: none,thresh,floyd,atkinson.")
-@click.option("--threshold", default="0.5", help="Comma-separated cutoff 0–1 for thresh/diffusion.")
-@click.option("--diffusion", default="1.0", help="Comma-separated diffusion strength (repeat-last).")
-@click.option("--spacing", type=int, default=1, help="Blank lines between images.")
-@click.option("--heading", help="Optional heading printed once before blocks.")
-@click.option("--caption", help="Comma-separated list of per-image captions.")
-@click.option("--footer", help="Footer text printed after all output.")
-@click.option("--clean", is_flag=True, help="Print content only (no title/description/metadata).")
-@click.option("--brightness", default="1.0", help="Comma-separated brightness multipliers.")
-@click.option("--contrast", default="1.0", help="Comma-separated contrast multipliers.")
-@click.option("--gamma", default="1.0", help="Comma-separated gamma values.")
-@click.option("--autocontrast", is_flag=True, help="Apply auto-contrast before dithering.")
+@add_core_image_options
+@click.option(
+    "--heading",
+    help="Optional heading printed once before blocks.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--caption",
+    help="Comma-separated list of per-image captions.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--footer",
+    help="Footer text printed after all output.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--clean",
+    is_flag=True,
+    help="Print content only (no title/description/metadata).",
+    cls=GroupedOption,
+    group=OUTPUT_GROUP,
+)
 @click.option(
     "--video",
     type=click.Choice(["frame", "preview"]),
     default="frame",
     help="Video attachments: 'frame' extracts first frame (requires ffmpeg), 'preview' uses preview image.",
+    cls=GroupedOption,
+    group=VIDEO_GROUP,
 )
-@click.option("--ffmpeg", help="Explicit ffmpeg path for --video=frame.")
+@click.option(
+    "--ffmpeg",
+    help="Explicit ffmpeg path for --video=frame.",
+    cls=GroupedOption,
+    group=VIDEO_GROUP,
+)
 @click.option(
     "--pdf",
     type=click.Choice(["first", "all"]),
     default="first",
     help="PDF attachments: print first page or all pages.",
+    cls=GroupedOption,
+    group=PDF_GROUP,
 )
-@click.option("--pdf-pages", help="Specific PDF pages (1-indexed), e.g. '1,3,5'.")
-@click.option("--pdf-range", help="PDF page range 'start,end'; use -1 for end.")
-@click.option("--qr", is_flag=True, help="Append a QR code with the block URL.")
+@click.option(
+    "--pdf-pages",
+    help="Specific PDF pages (1-indexed), e.g. '1,3,5'.",
+    cls=GroupedOption,
+    group=PDF_GROUP,
+)
+@click.option(
+    "--pdf-range",
+    help="PDF page range 'start,end'; use -1 for end.",
+    cls=GroupedOption,
+    group=PDF_GROUP,
+)
+@click.option(
+    "--qr",
+    is_flag=True,
+    help="Append a QR code with the block URL.",
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
 @click.option(
     "--qr-size",
     type=int,
     default=4,
     help="QR module size (printer dependent). Default: 4.",
+    cls=GroupedOption,
+    group=QR_GROUP,
 )
 @click.option(
     "--qr-correction",
     type=click.Choice(["L", "M", "Q", "H"]),
     default="M",
     help="QR error correction level.",
+    cls=GroupedOption,
+    group=QR_GROUP,
 )
-@click.option("--no-cache", is_flag=True, help="Bypass local Are.na cache for this run.")
-@click.option("--debug", is_flag=True, help="Emit per-image debug info during printing.")
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    help="Bypass local Are.na cache for this run.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
+)
 def arena_block(
     blocks,
     method,
@@ -800,8 +1036,12 @@ def arena_block(
     debug,
 ):
     """Print one or more Are.na blocks."""
-    media_opts, missing_ffmpeg = build_media_options(video, ffmpeg, pdf, pdf_pages, pdf_range)
-    qr_cfg = QRConfig(enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M))
+    media_opts, missing_ffmpeg = build_media_options(
+        video, ffmpeg, pdf, pdf_pages, pdf_range
+    )
+    qr_cfg = QRConfig(
+        enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M)
+    )
     config = create_arena_image_config(
         method,
         dither,
@@ -839,7 +1079,9 @@ def arena_block(
     )
 
     if missing_ffmpeg and video == "frame":
-        sys.stderr.write("Warning: ffmpeg not found; using preview images for videos.\n")
+        sys.stderr.write(
+            "Warning: ffmpeg not found; using preview images for videos.\n"
+        )
 
     printed_any = False
     heading_printed = False
@@ -875,7 +1117,6 @@ def arena_block(
                 job.print_heading(heading, trailing_blank=True)
                 heading_printed = True
 
-
             success = print_arena_block(
                 job,
                 block,
@@ -901,65 +1142,143 @@ def arena_block(
 
 @arena_group.command("channel")
 @click.argument("channel", required=True)
-@click.option("--method", default="raster", help="Comma-separated: raster,column,graphics.")
-@click.option("--dither", help="Comma-separated: none,thresh,floyd,atkinson.")
-@click.option("--threshold", default="0.5", help="Comma-separated cutoff 0–1 for thresh/diffusion.")
-@click.option("--diffusion", default="1.0", help="Comma-separated diffusion strength (repeat-last).")
-@click.option("--spacing", type=int, default=1, help="Blank lines between images.")
-@click.option("--heading", help="Override heading text for the channel.")
-@click.option("--caption", help="Comma-separated list of per-image captions.")
-@click.option("--footer", help="Footer text printed after all output.")
-@click.option("--clean", is_flag=True, help="Print content only (no title/description/metadata).")
-@click.option("--brightness", default="1.0", help="Comma-separated brightness multipliers.")
-@click.option("--contrast", default="1.0", help="Comma-separated contrast multipliers.")
-@click.option("--gamma", default="1.0", help="Comma-separated gamma values.")
-@click.option("--autocontrast", is_flag=True, help="Apply auto-contrast before dithering.")
+@add_core_image_options
+@click.option(
+    "--heading",
+    help="Override heading text for the channel.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--caption",
+    help="Comma-separated list of per-image captions.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--footer",
+    help="Footer text printed after all output.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--clean",
+    is_flag=True,
+    help="Print content only (no title/description/metadata).",
+    cls=GroupedOption,
+    group=OUTPUT_GROUP,
+)
 @click.option(
     "--video",
     type=click.Choice(["frame", "preview"]),
     default="frame",
     help="Video attachments: 'frame' extracts first frame (requires ffmpeg), 'preview' uses preview image.",
+    cls=GroupedOption,
+    group=VIDEO_GROUP,
 )
-@click.option("--ffmpeg", help="Explicit ffmpeg path for --video=frame.")
+@click.option(
+    "--ffmpeg",
+    help="Explicit ffmpeg path for --video=frame.",
+    cls=GroupedOption,
+    group=VIDEO_GROUP,
+)
 @click.option(
     "--pdf",
     type=click.Choice(["first", "all"]),
     default="first",
     help="PDF attachments: print first page or all pages.",
+    cls=GroupedOption,
+    group=PDF_GROUP,
 )
-@click.option("--pdf-pages", help="Specific PDF pages (1-indexed), e.g. '1,3,5'.")
-@click.option("--pdf-range", help="PDF page range 'start,end'; use -1 for end.")
-@click.option("--filter", help="Comma-separated block classes to include (text,image,link,media,attachment,channel).")
-@click.option("--exclude", help="Comma-separated block classes to skip.")
-@click.option("--limit", type=int, help="Stop after printing N blocks.")
-@click.option("--since", help="Only include blocks with connected_at >= ISO timestamp.")
-@click.option("--include-channels", is_flag=True, help="Include nested channels within contents.")
+@click.option(
+    "--pdf-pages",
+    help="Specific PDF pages (1-indexed), e.g. '1,3,5'.",
+    cls=GroupedOption,
+    group=PDF_GROUP,
+)
+@click.option(
+    "--pdf-range",
+    help="PDF page range 'start,end'; use -1 for end.",
+    cls=GroupedOption,
+    group=PDF_GROUP,
+)
+@click.option(
+    "--filter",
+    help="Comma-separated block classes to include (text,image,link,media,attachment,channel).",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--exclude",
+    help="Comma-separated block classes to skip.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--limit",
+    type=int,
+    help="Stop after printing N blocks.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--since",
+    help="Only include blocks with connected_at >= ISO timestamp.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--include-channels",
+    is_flag=True,
+    help="Include nested channels within contents.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
 @click.option(
     "--cut-between",
     is_flag=True,
     help="Cut between each printed image; outputs images only.",
+    cls=GroupedOption,
+    group=OUTPUT_GROUP,
 )
-@click.option("--qr", is_flag=True, help="Print a QR code of the channel URL beneath the heading.")
+@click.option(
+    "--qr",
+    is_flag=True,
+    help="Print a QR code of the channel URL beneath the heading.",
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
 @click.option(
     "--qr-size",
     type=int,
     default=4,
     help="QR module size (printer dependent). Default: 4.",
+    cls=GroupedOption,
+    group=QR_GROUP,
 )
 @click.option(
     "--qr-correction",
     type=click.Choice(["L", "M", "Q", "H"]),
     default="M",
     help="QR error correction level.",
+    cls=GroupedOption,
+    group=QR_GROUP,
 )
 @click.option(
     "--sort",
     type=click.Choice(["asc", "desc", "random"]),
     default="desc",
     help="Ordering for channel contents: ascending, descending, or random (default desc).",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
 )
-@click.option("--no-cache", is_flag=True, help="Bypass local Are.na cache for this run.")
-@click.option("--debug", is_flag=True, help="Emit per-image debug info during printing.")
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    help="Bypass local Are.na cache for this run.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
+)
 def arena_channel(
     channel,
     method,
@@ -1000,7 +1319,9 @@ def arena_channel(
         sys.stderr.write(f"Error: {exc}\n")
         sys.exit(1)
 
-    media_opts, missing_ffmpeg = build_media_options(video, ffmpeg, pdf, pdf_pages, pdf_range)
+    media_opts, missing_ffmpeg = build_media_options(
+        video, ffmpeg, pdf, pdf_pages, pdf_range
+    )
     config = create_arena_image_config(
         method,
         dither,
@@ -1015,7 +1336,9 @@ def arena_channel(
         gamma,
         autocontrast,
     )
-    qr_cfg = QRConfig(enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M))
+    qr_cfg = QRConfig(
+        enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M)
+    )
     block_qr_cfg = QRConfig(enabled=False, size=qr_size, ec=qr_cfg.ec)
 
     cut_mode = cut_between
@@ -1046,9 +1369,7 @@ def arena_channel(
     except ArenaNotFound:
         client.close()
         if not os.getenv("ARENA_TOKEN"):
-            sys.stderr.write(
-                f"Error: Unauthorized for {channel} (set ARENA_TOKEN?).\n"
-            )
+            sys.stderr.write(f"Error: Unauthorized for {channel} (set ARENA_TOKEN?).\n")
         else:
             sys.stderr.write(f"Error: Not found: {channel}\n")
         sys.exit(1)
@@ -1064,9 +1385,7 @@ def arena_channel(
     channel_url = canonical_channel_url(ref, meta_preview)
     if heading is not None:
         heading_lines = [
-            collapse_spaces(part)
-            for part in heading.splitlines()
-            if part.strip()
+            collapse_spaces(part) for part in heading.splitlines() if part.strip()
         ]
     else:
         heading_lines = compute_channel_heading(meta_preview)
@@ -1097,7 +1416,9 @@ def arena_channel(
     )
 
     if missing_ffmpeg and video == "frame":
-        sys.stderr.write("Warning: ffmpeg not found; using preview images for videos.\n")
+        sys.stderr.write(
+            "Warning: ffmpeg not found; using preview images for videos.\n"
+        )
 
     def block_sort_key(item: Dict[str, Any]) -> float:
         ts = block_connected_at(item) or parse_timestamp(item.get("created_at"))
@@ -1119,7 +1440,9 @@ def arena_channel(
 
     try:
         for block in blocks:
-            if not should_include_block(block, include_channels, filter_list, exclude_list):
+            if not should_include_block(
+                block, include_channels, filter_list, exclude_list
+            ):
                 continue
 
             added_dt = block_connected_at(block)
@@ -1129,7 +1452,6 @@ def arena_channel(
             if not cut_mode and not heading_printed and heading_lines:
                 job.print_heading(heading_lines, trailing_blank=True)
                 heading_printed = True
-
 
             block_id_val = str(block.get("id") or "unknown")
             success = print_arena_block(
@@ -1158,7 +1480,9 @@ def arena_channel(
             try:
                 printer.qr(channel_url, size=qr_cfg.size, ec=qr_cfg.ec)
             except Exception as exc:
-                sys.stderr.write(f"Warning: Failed to print QR for {channel_url}: {exc}\n")
+                sys.stderr.write(
+                    f"Warning: Failed to print QR for {channel_url}: {exc}\n"
+                )
             printer.set(align="left")
 
         if not cut_mode:
@@ -1167,6 +1491,7 @@ def arena_channel(
     finally:
         printer.close()
         client.close()
+
 
 @cli.command()
 @click.argument("files", nargs=-1)
@@ -1265,7 +1590,7 @@ def pdf(files, format, range, pages, **kwargs):
     print_with_images(config, images, names=names, heading=kwargs["heading"])
 
 
-@cli.group()
+@cli.group(cls=GroupedGroup)
 def action():
     """Perform printer actions."""
     pass
