@@ -114,6 +114,8 @@ def print_images_from_pil(
     debug: bool = False,
     spacing: int = 1,
     names: Optional[Iterable[str]] = None,
+    auto_orient: bool = False,
+    cut_between: bool = False,
 ) -> int:
     """print pre-loaded PIL images and return next caption index"""
 
@@ -121,6 +123,9 @@ def print_images_from_pil(
         parsed_captions_list: List[str] = captions_list[:]
     else:
         parsed_captions_list = parse_caption_csv(captions_str)
+
+    if cut_between:
+        parsed_captions_list = []
 
     img_list = list(images)
     name_list = (
@@ -149,7 +154,7 @@ def print_images_from_pil(
     for idx, img in enumerate(img_list):
         scale = float(get(scale_list, idx))
         al = get(align_list, idx).lower()
-        orient = desired_orientation(al)
+        orient = "landscape" if auto_orient and img.width > img.height else desired_orientation(al)
 
         im = img.copy()
         if orient == "landscape":
@@ -169,7 +174,7 @@ def print_images_from_pil(
             )
 
         total_lines += math.ceil(im.height / DOTS_PER_LINE)
-        processed.append((im, al, idx, name_list[idx], scale))
+        processed.append((im, al, idx, name_list[idx], scale, orient))
 
     if total_lines > MAX_LINES:
         try:
@@ -184,8 +189,7 @@ def print_images_from_pil(
             sys.stderr.write("No TTY for confirm. Aborting.\n")
             sys.exit(1)
 
-    for im, al, idx, name, scale in processed:
-        orient = desired_orientation(al)
+    for im, al, idx, name, scale, orient in processed:
         method = get(method_list, idx)
         impl = impl_map[method]
         dith = get(dither_list, idx)
@@ -235,7 +239,7 @@ def print_images_from_pil(
                 if idx < len(processed) - 1:
                     printer.text("\n")
 
-            if spacing:
+            if spacing and not cut_between:
                 printer.text("\n" * spacing)
 
         except ImageWidthError as e:
@@ -243,7 +247,11 @@ def print_images_from_pil(
         except Exception as e:
             sys.stderr.write(f"Error printing {name}: {e}\n")
 
-    if footer_text:
+        if cut_between:
+            printer.cut()
+            printer.set(align="left")
+
+    if footer_text and not cut_between:
         printer.text("\n")
         printer.set(align="center", font="b", bold=True)
         printer.text(footer_text + "\n")

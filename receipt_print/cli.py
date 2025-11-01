@@ -437,6 +437,8 @@ def print_arena_block(
     media_opts: MediaHandlingOptions,
     qr_cfg: QRConfig,
     clean: bool,
+    images_only: bool = False,
+    cut_between: bool = False,
     added_override: Optional[datetime] = None,
 ) -> bool:
     """Print a single block following the Are.na spec."""
@@ -450,12 +452,14 @@ def print_arena_block(
 
     images, image_names = gather_images_for_block(block, client, media_opts)
 
-    if klass == "text" and text_content:
+    if images:
+        job.print_images(images, names=image_names)
+        content_printed = True
+    elif images_only:
+        return False
+    elif klass == "text" and text_content:
         text_content = collapse_spaces(LINK_PATTERN.sub(lambda m: m.group(1), text_content))
         job.print_text(text_content, align="left", font="a")
-        content_printed = True
-    elif images:
-        job.print_images(images, names=image_names)
         content_printed = True
     elif text_content:
         text_content = collapse_spaces(LINK_PATTERN.sub(lambda m: m.group(1), text_content))
@@ -469,7 +473,7 @@ def print_arena_block(
         job.print_text(fallback, align="left", font="a")
         content_printed = True
 
-    if not clean:
+    if not clean and not images_only:
         if title_clean:
             job.print_text(title_clean, align="left", font="b", bold=True)
 
@@ -485,7 +489,7 @@ def print_arena_block(
         for meta in metadata_lines:
             job.print_text(collapse_spaces(meta), align="right", font="a")
 
-    if qr_cfg.enabled:
+    if qr_cfg.enabled and not images_only:
         url = canonical_block_url(block_id)
         job.printer.set(align="right")
         try:
@@ -493,7 +497,8 @@ def print_arena_block(
         except Exception as exc:
             sys.stderr.write(f"Warning: Failed to print QR for {url}: {exc}\n")
 
-    job.line_break(1 if qr_cfg.enabled else 2)
+    if not cut_between:
+        job.line_break(1 if qr_cfg.enabled else 2)
     return content_printed
 
 
@@ -796,7 +801,7 @@ def arena_block(
                 client,
                 media_opts,
                 qr_cfg,
-                clean,
+                clean=clean,
             )
             if success:
                 printed_any = True
@@ -843,6 +848,11 @@ def arena_block(
 @click.option("--limit", type=int, help="Stop after printing N blocks.")
 @click.option("--since", help="Only include blocks with connected_at >= ISO timestamp.")
 @click.option("--include-channels", is_flag=True, help="Include nested channels within contents.")
+@click.option(
+    "--cut-between",
+    is_flag=True,
+    help="Cut between each printed image; outputs images only.",
+)
 @click.option("--qr", is_flag=True, help="Print a QR code of the channel URL beneath the heading.")
 @click.option(
     "--qr-size",
@@ -885,6 +895,7 @@ def arena_channel(
     limit,
     since,
     include_channels,
+    cut_between,
     qr,
     qr_size,
     qr_correction,
@@ -904,10 +915,21 @@ def arena_channel(
     qr_cfg = QRConfig(enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M))
     block_qr_cfg = QRConfig(enabled=False, size=qr_size, ec=qr_cfg.ec)
 
+    cut_mode = cut_between
+    clean_mode = clean or cut_mode
+    if cut_mode:
+        config.spacing = 0
+        config.captions_str = None
+        config.footer_text = None
+        qr_cfg.enabled = False
+
     since_dt = parse_since_option(since)
     filter_list = parse_list_option(filter)
     exclude_list = parse_list_option(exclude)
     limit_val = limit if limit and limit > 0 else None
+
+    if cut_mode and not filter_list:
+        filter_list = ["image"]
 
     client = ArenaClient(cache_enabled=not no_cache)
 
@@ -946,6 +968,9 @@ def arena_channel(
     else:
         heading_lines = compute_channel_heading(meta_preview)
 
+    if cut_mode:
+        heading_lines = []
+
     printer = connect_printer()
     job = ArenaPrintJob(
         printer,
@@ -958,8 +983,10 @@ def arena_channel(
         config.diffusions,
         config.captions_str,
         config.spacing,
-        footer,
+        None if cut_mode else footer,
         debug=config.debug,
+        auto_orient=cut_mode,
+        cut_between=cut_mode,
     )
 
     if missing_ffmpeg and video == "frame":
@@ -992,7 +1019,7 @@ def arena_channel(
             if since_dt and (not added_dt or added_dt < since_dt):
                 continue
 
-            if not heading_printed and heading_lines:
+            if not cut_mode and not heading_printed and heading_lines:
                 job.print_heading(heading_lines, trailing_blank=True)
                 heading_printed = True
 
@@ -1005,7 +1032,9 @@ def arena_channel(
                 client,
                 media_opts,
                 block_qr_cfg,
-                clean,
+                clean=clean_mode,
+                images_only=cut_mode,
+                cut_between=cut_mode,
                 added_override=added_dt,
             )
             if success:
@@ -1017,7 +1046,7 @@ def arena_channel(
             sys.stderr.write("No blocks to print.\n")
             sys.exit(0)
 
-        if qr_cfg.enabled and channel_url:
+        if not cut_mode and qr_cfg.enabled and channel_url:
             printer.set(align="right", font="a")
             try:
                 printer.qr(channel_url, size=qr_cfg.size, ec=qr_cfg.ec)
@@ -1025,8 +1054,9 @@ def arena_channel(
                 sys.stderr.write(f"Warning: Failed to print QR for {channel_url}: {exc}\n")
             printer.set(align="left")
 
-        job.print_footer()
-        printer.cut()
+        if not cut_mode:
+            job.print_footer()
+            printer.cut()
     finally:
         printer.close()
         client.close()

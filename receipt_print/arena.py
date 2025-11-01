@@ -450,6 +450,8 @@ class ArenaPrintJob:
         spacing: int,
         footer_text: Optional[str],
         debug: bool = False,
+        auto_orient: bool = False,
+        cut_between: bool = False,
     ):
         self.printer = printer
         self.scales = scales or [1.0]
@@ -465,6 +467,8 @@ class ArenaPrintJob:
         self.debug = debug
         self.caption_index = 0
         self._footer_printed = False
+        self.auto_orient_images = auto_orient
+        self.cut_between_images = cut_between
 
     def print_heading(
         self,
@@ -575,8 +579,10 @@ class ArenaPrintJob:
             caption_start=self.caption_index,
             footer_text=None,
             debug=self.debug,
-            spacing=self.spacing,
+            spacing=0 if self.cut_between_images else self.spacing,
             names=names,
+            auto_orient=self.auto_orient_images,
+            cut_between=self.cut_between_images,
         )
 
     def line_break(self, count: int = 1) -> None:
