@@ -446,6 +446,10 @@ class ArenaPrintJob:
         dithers: List[Optional[str]],
         thresholds: List[float],
         diffusions: List[float],
+        brightness: List[float],
+        contrast: List[float],
+        gamma: List[float],
+        autocontrast: bool,
         captions_str: Optional[str],
         spacing: int,
         footer_text: Optional[str],
@@ -461,6 +465,10 @@ class ArenaPrintJob:
         self.dithers = dithers or [None]
         self.thresholds = thresholds or [0.5]
         self.diffusions = diffusions or [1.0]
+        self.brightness = brightness or [1.0]
+        self.contrast = contrast or [1.0]
+        self.gamma = gamma or [1.0]
+        self.autocontrast = autocontrast
         self.captions = parse_caption_csv(captions_str)
         self.spacing = spacing
         self.footer_text = footer_text
@@ -575,6 +583,10 @@ class ArenaPrintJob:
             self.dithers,
             self.thresholds,
             self.diffusions,
+            brightness_list=self.brightness,
+            contrast_list=self.contrast,
+            gamma_list=self.gamma,
+            autocontrast=self.autocontrast,
             captions_list=self.captions,
             caption_start=self.caption_index,
             footer_text=None,

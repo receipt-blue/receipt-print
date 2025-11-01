@@ -6,7 +6,7 @@ import re
 import shlex
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from tempfile import NamedTemporaryFile
@@ -57,6 +57,10 @@ class ImageProcessingConfig:
     dithers: List[Optional[str]]
     thresholds: List[float]
     diffusions: List[float]
+    brightness: List[float] = field(default_factory=lambda: [1.0])
+    contrast: List[float] = field(default_factory=lambda: [1.0])
+    gamma: List[float] = field(default_factory=lambda: [1.0])
+    autocontrast: bool = False
     captions_str: Optional[str] = None
     footer_text: Optional[str] = None
     debug: bool = False
@@ -154,6 +158,26 @@ image_options = [
         default="1.0",
         help="Comma-separated diffusion strength (0=no spread,1=classic).",
     ),
+    click.option(
+        "--brightness",
+        default="1.0",
+        help="Comma-separated brightness multipliers (1.0=no change).",
+    ),
+    click.option(
+        "--contrast",
+        default="1.0",
+        help="Comma-separated contrast multipliers (1.0=no change).",
+    ),
+    click.option(
+        "--gamma",
+        default="1.0",
+        help="Comma-separated gamma values (<1 brightens, >1 darkens).",
+    ),
+    click.option(
+        "--autocontrast",
+        is_flag=True,
+        help="Apply auto-contrast before dithering.",
+    ),
     click.option("--heading", help="Optional heading before images."),
     click.option("--caption", help="Comma-separated list of per-image captions."),
     click.option("--footer", help="Global footer text to print after all images."),
@@ -181,6 +205,17 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     )
     thresholds = parse_comma_separated(kwargs["threshold"], float)
     diffusions = parse_comma_separated(kwargs["diffusion"], float)
+    brightness = parse_comma_separated(kwargs.get("brightness"), float)
+    contrast = parse_comma_separated(kwargs.get("contrast"), float)
+    gamma_vals = parse_comma_separated(kwargs.get("gamma"), float)
+    autocontrast = kwargs.get("autocontrast", False)
+
+    if not brightness:
+        brightness = [1.0]
+    if not contrast:
+        contrast = [1.0]
+    if not gamma_vals:
+        gamma_vals = [1.0]
 
     # Validation
     if not all(validate_method(m) for m in methods):
@@ -191,6 +226,12 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         raise click.BadParameter("--threshold values must be 0–1")
     if not all(validate_diffusion(d) for d in diffusions):
         raise click.BadParameter("--diffusion must be >= 0")
+    if not all(v > 0 for v in brightness):
+        raise click.BadParameter("--brightness must be > 0")
+    if not all(v > 0 for v in contrast):
+        raise click.BadParameter("--contrast must be > 0")
+    if not all(v > 0 for v in gamma_vals):
+        raise click.BadParameter("--gamma must be > 0")
 
     ts_fmt = None if kwargs["timestamp"].lower() == "none" else kwargs["timestamp"]
 
@@ -201,6 +242,10 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         dithers=[d.lower() if d and d != "none" else None for d in dithers],
         thresholds=thresholds,
         diffusions=diffusions,
+        brightness=brightness,
+        contrast=contrast,
+        gamma=gamma_vals,
+        autocontrast=autocontrast,
         ts_fmt=ts_fmt,
         captions_str=kwargs["caption"],
         footer_text=kwargs["footer"],
@@ -218,6 +263,10 @@ def create_arena_image_config(
     footer: Optional[str],
     spacing: int,
     debug: bool,
+    brightness: str,
+    contrast: str,
+    gamma: str,
+    autocontrast: bool,
 ) -> ImageProcessingConfig:
     """Build an ImageProcessingConfig for Are.na printing with defaults."""
     kwargs = {
@@ -233,6 +282,10 @@ def create_arena_image_config(
         "debug": debug,
         "spacing": spacing,
         "heading": None,
+        "brightness": brightness,
+        "contrast": contrast,
+        "gamma": gamma,
+        "autocontrast": autocontrast,
     }
     return create_image_config(**kwargs)
 
@@ -537,6 +590,10 @@ def print_with_images(config: ImageProcessingConfig, images, names=None, heading
         config.dithers,
         config.thresholds,
         config.diffusions,
+        brightness_list=config.brightness,
+        contrast_list=config.contrast,
+        gamma_list=config.gamma,
+        autocontrast=config.autocontrast,
         captions_str=config.captions_str,
         footer_text=config.footer_text,
         debug=config.debug,
@@ -682,6 +739,10 @@ def arena_group():
 @click.option("--caption", help="Comma-separated list of per-image captions.")
 @click.option("--footer", help="Footer text printed after all output.")
 @click.option("--clean", is_flag=True, help="Print content only (no title/description/metadata).")
+@click.option("--brightness", default="1.0", help="Comma-separated brightness multipliers.")
+@click.option("--contrast", default="1.0", help="Comma-separated contrast multipliers.")
+@click.option("--gamma", default="1.0", help="Comma-separated gamma values.")
+@click.option("--autocontrast", is_flag=True, help="Apply auto-contrast before dithering.")
 @click.option(
     "--video",
     type=click.Choice(["frame", "preview"]),
@@ -723,6 +784,10 @@ def arena_block(
     caption,
     footer,
     clean,
+    brightness,
+    contrast,
+    gamma,
+    autocontrast,
     video,
     ffmpeg,
     pdf,
@@ -737,7 +802,20 @@ def arena_block(
     """Print one or more Are.na blocks."""
     media_opts, missing_ffmpeg = build_media_options(video, ffmpeg, pdf, pdf_pages, pdf_range)
     qr_cfg = QRConfig(enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M))
-    config = create_arena_image_config(method, dither, threshold, diffusion, caption, footer, spacing, debug)
+    config = create_arena_image_config(
+        method,
+        dither,
+        threshold,
+        diffusion,
+        caption,
+        footer,
+        spacing,
+        debug,
+        brightness,
+        contrast,
+        gamma,
+        autocontrast,
+    )
 
     client = ArenaClient(cache_enabled=not no_cache)
     printer = connect_printer()
@@ -750,6 +828,10 @@ def arena_block(
         config.dithers,
         config.thresholds,
         config.diffusions,
+        config.brightness,
+        config.contrast,
+        config.gamma,
+        config.autocontrast,
         config.captions_str,
         config.spacing,
         footer,
@@ -828,6 +910,10 @@ def arena_block(
 @click.option("--caption", help="Comma-separated list of per-image captions.")
 @click.option("--footer", help="Footer text printed after all output.")
 @click.option("--clean", is_flag=True, help="Print content only (no title/description/metadata).")
+@click.option("--brightness", default="1.0", help="Comma-separated brightness multipliers.")
+@click.option("--contrast", default="1.0", help="Comma-separated contrast multipliers.")
+@click.option("--gamma", default="1.0", help="Comma-separated gamma values.")
+@click.option("--autocontrast", is_flag=True, help="Apply auto-contrast before dithering.")
 @click.option(
     "--video",
     type=click.Choice(["frame", "preview"]),
@@ -885,6 +971,10 @@ def arena_channel(
     caption,
     footer,
     clean,
+    brightness,
+    contrast,
+    gamma,
+    autocontrast,
     video,
     ffmpeg,
     pdf,
@@ -911,7 +1001,20 @@ def arena_channel(
         sys.exit(1)
 
     media_opts, missing_ffmpeg = build_media_options(video, ffmpeg, pdf, pdf_pages, pdf_range)
-    config = create_arena_image_config(method, dither, threshold, diffusion, caption, footer, spacing, debug)
+    config = create_arena_image_config(
+        method,
+        dither,
+        threshold,
+        diffusion,
+        caption,
+        footer,
+        spacing,
+        debug,
+        brightness,
+        contrast,
+        gamma,
+        autocontrast,
+    )
     qr_cfg = QRConfig(enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M))
     block_qr_cfg = QRConfig(enabled=False, size=qr_size, ec=qr_cfg.ec)
 
@@ -981,6 +1084,10 @@ def arena_channel(
         config.dithers,
         config.thresholds,
         config.diffusions,
+        config.brightness,
+        config.contrast,
+        config.gamma,
+        config.autocontrast,
         config.captions_str,
         config.spacing,
         None if cut_mode else footer,

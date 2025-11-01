@@ -7,7 +7,7 @@ from typing import Iterable, List, Optional
 
 import numpy as np
 from escpos.exceptions import ImageWidthError
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 
 from .printer import DOTS_PER_LINE, MAX_LINES
 
@@ -63,6 +63,35 @@ def apply_alignment(al: str, orient: str) -> tuple[str, bool]:
     return ("left", False)
 
 
+def _apply_gamma(image: Image.Image, gamma: float) -> Image.Image:
+    if math.isclose(gamma, 1.0, rel_tol=1e-3):
+        return image
+    gamma = max(gamma, 1e-3)
+    inv = 1.0 / gamma
+    lut = [min(255, max(0, int((i / 255.0) ** inv * 255 + 0.5))) for i in range(256)]
+    bands = len(image.getbands())
+    return image.point(lut * bands)
+
+
+def preprocess_image(
+    image: Image.Image,
+    brightness: float,
+    contrast: float,
+    gamma: float,
+    autocontrast: bool,
+) -> Image.Image:
+    work = image.convert("RGB")
+    if autocontrast:
+        work = ImageOps.autocontrast(work, cutoff=2)
+    if not math.isclose(brightness, 1.0, rel_tol=1e-3):
+        work = ImageEnhance.Brightness(work).enhance(brightness)
+    if not math.isclose(contrast, 1.0, rel_tol=1e-3):
+        work = ImageEnhance.Contrast(work).enhance(contrast)
+    if not math.isclose(gamma, 1.0, rel_tol=1e-3):
+        work = _apply_gamma(work, gamma)
+    return work
+
+
 def apply_dither(
     img: Image.Image, mode: Optional[str], thresh: float, diff: float
 ) -> Image.Image:
@@ -114,6 +143,10 @@ def print_images_from_pil(
     debug: bool = False,
     spacing: int = 1,
     names: Optional[Iterable[str]] = None,
+    brightness_list: Optional[List[float]] = None,
+    contrast_list: Optional[List[float]] = None,
+    gamma_list: Optional[List[float]] = None,
+    autocontrast: bool = False,
     auto_orient: bool = False,
     cut_between: bool = False,
 ) -> int:
@@ -131,6 +164,13 @@ def print_images_from_pil(
     name_list = (
         list(names) if names is not None else [f"{i}" for i in range(len(img_list))]
     )
+
+    if not brightness_list:
+        brightness_list = [1.0]
+    if not contrast_list:
+        contrast_list = [1.0]
+    if not gamma_list:
+        gamma_list = [1.0]
 
     max_width = 576
     try:
@@ -173,8 +213,22 @@ def print_images_from_pil(
                 Image.Resampling.LANCZOS,
             )
 
+        brightness_val = float(get(brightness_list, idx))
+        contrast_val = float(get(contrast_list, idx))
+        gamma_val = float(get(gamma_list, idx))
+
+        if (
+            autocontrast
+            or not math.isclose(brightness_val, 1.0, rel_tol=1e-3)
+            or not math.isclose(contrast_val, 1.0, rel_tol=1e-3)
+            or not math.isclose(gamma_val, 1.0, rel_tol=1e-3)
+        ):
+            im = preprocess_image(im, brightness_val, contrast_val, gamma_val, autocontrast)
+
         total_lines += math.ceil(im.height / DOTS_PER_LINE)
-        processed.append((im, al, idx, name_list[idx], scale, orient))
+        processed.append(
+            (im, al, idx, name_list[idx], scale, orient, brightness_val, contrast_val, gamma_val)
+        )
 
     if total_lines > MAX_LINES:
         try:
@@ -189,7 +243,7 @@ def print_images_from_pil(
             sys.stderr.write("No TTY for confirm. Aborting.\n")
             sys.exit(1)
 
-    for im, al, idx, name, scale, orient in processed:
+    for im, al, idx, name, scale, orient, brightness_val, contrast_val, gamma_val in processed:
         method = get(method_list, idx)
         impl = impl_map[method]
         dith = get(dither_list, idx)
@@ -203,7 +257,9 @@ def print_images_from_pil(
             printer.textln(
                 f"[DEBUG] align={al}, scale={scale:.2f}, "
                 f"method={method}, dither={dith}, "
-                f"threshold={thresh:.2f}, diffusion={diff:.2f}"
+                f"threshold={thresh:.2f}, diffusion={diff:.2f}, "
+                f"brightness={brightness_val:.2f}, contrast={contrast_val:.2f}, "
+                f"gamma={gamma_val:.2f}, autocontrast={autocontrast}"
             )
             printer.set(align="left")
 
@@ -274,135 +330,43 @@ def print_images(
     footer_text: Optional[str] = None,
     debug: bool = False,
     spacing: int = 1,
+    brightness_list: Optional[List[float]] = None,
+    contrast_list: Optional[List[float]] = None,
+    gamma_list: Optional[List[float]] = None,
+    autocontrast: bool = False,
 ):
-    # parsed captions (per-image)
-    parsed_captions_list: List[str] = parse_caption_csv(captions_str)
-
-    # determine max width
-    max_width = 576
-    try:
-        w = printer.profile.profile_data["media"]["width"]["pixels"]
-        if w != "Unknown":
-            max_width = int(w)
-    except Exception:
-        pass
-
-    impl_map = {
-        "raster": "bitImageRaster",
-        "column": "bitImageColumn",
-        "graphics": "graphics",
-    }
-
-    def get(lst, i):
-        return lst[i] if i < len(lst) else lst[-1]
-
-    processed = []
-    total_lines = 0
-    for idx, path in enumerate(files):
-        scale = float(get(scale_list, idx))
-        al = get(align_list, idx).lower()
-        orient = desired_orientation(al)
-
+    images: List[Image.Image] = []
+    names: List[str] = []
+    for path in files:
         try:
             img = Image.open(path)
             img.load()
+            images.append(img.copy())
+            names.append(path)
+            img.close()
         except Exception as e:
             sys.stderr.write(f"Warning: could not open {path}: {e}\n")
-            continue
 
-        if orient == "landscape":
-            img = img.rotate(270, expand=True)
+    if not images:
+        return
 
-        if img.width > max_width:
-            ratio = max_width / img.width
-            img = img.resize(
-                (int(img.width * ratio), int(img.height * ratio)),
-                Image.Resampling.LANCZOS,
-            )
-
-        if not math.isclose(scale, 1.0, rel_tol=1e-5):
-            img = img.resize(
-                (int(img.width * scale), int(img.height * scale)),
-                Image.Resampling.LANCZOS,
-            )
-
-        total_lines += math.ceil(img.height / DOTS_PER_LINE)
-        processed.append((img, al, idx, path, scale))
-
-    # line-limit warning
-    if total_lines > MAX_LINES:
-        try:
-            with open("/dev/tty") as tty:
-                sys.stdout.write(
-                    f"Warning: {total_lines} image-lines > limit {MAX_LINES}. Continue? [y/N] "
-                )
-                sys.stdout.flush()
-                if tty.readline().strip().lower() not in ("y", "yes"):
-                    sys.exit(0)
-        except Exception:
-            sys.stderr.write("No TTY for confirm. Aborting.\n")
-            sys.exit(1)
-
-    for img, al, idx, path, scale in processed:
-        orient = desired_orientation(al)
-        method = get(method_list, idx)
-        impl = impl_map[method]
-        dith = get(dither_list, idx)
-        thresh = float(get(threshold_list, idx))
-        diff = float(get(diffusion_list, idx))
-        esc_align, center = apply_alignment(al, orient)
-
-        if debug:
-            printer.set(align="left")
-            printer.textln(f"[DEBUG] file={path}")
-            printer.textln(
-                f"[DEBUG] align={al}, scale={scale:.2f}, "
-                f"method={method}, dither={dith}, "
-                f"threshold={thresh:.2f}, diffusion={diff:.2f}"
-            )
-            printer.set(align="left")
-
-        if ts_format is not None:
-            try:
-                exif = img._getexif() or {}
-                raw = exif.get(36867) or exif.get(306)
-                if raw:
-                    dt = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
-                    printer.set(align="left", font="b", bold=True)
-                    printer.text(dt.strftime(ts_format) + "\n")
-            except Exception:
-                pass
-
-        img2 = apply_dither(img, dith, thresh, diff)
-        printer.set(align=esc_align)
-        try:
-            printer.image(img_source=img2, center=center, impl=impl)
-
-            caption_text = None
-            if parsed_captions_list:
-                if idx < len(parsed_captions_list):
-                    caption_text = parsed_captions_list[idx]
-                else:
-                    caption_text = parsed_captions_list[-1]
-
-            if caption_text:
-                printer.text("\n")
-                printer.set(align="center", font="b", bold=True)
-                printer.text(caption_text + "\n")
-                printer.set(align="left")
-                if idx < len(processed) - 1:
-                    printer.text("\n")
-
-            if spacing:
-                printer.text("\n" * spacing)
-
-        except ImageWidthError as e:
-            sys.stderr.write(f"Error printing {path}: too wide – {e}\n")
-        except Exception as e:
-            sys.stderr.write(f"Error printing {path}: {e}\n")
-
-    if footer_text:
-        printer.text("\n")
-        printer.set(align="center", font="b", bold=True)
-        printer.text(footer_text + "\n")
-        printer.set(align="left")
+    return print_images_from_pil(
+        printer,
+        images,
+        scale_list,
+        align_list,
+        method_list,
+        ts_format,
+        dither_list,
+        threshold_list,
+        diffusion_list,
+        captions_str=captions_str,
+        footer_text=footer_text,
+        debug=debug,
+        spacing=spacing,
+        names=names,
+        brightness_list=brightness_list,
+        contrast_list=contrast_list,
+        gamma_list=gamma_list,
+        autocontrast=autocontrast,
+    )
