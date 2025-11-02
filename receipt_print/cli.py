@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from tempfile import NamedTemporaryFile
 
 import click
+from click.core import ParameterSource
 from PIL import Image
 from escpos.escpos import QR_ECLEVEL_H, QR_ECLEVEL_L, QR_ECLEVEL_M, QR_ECLEVEL_Q
 
@@ -180,6 +181,25 @@ QR_LEVELS = {"L": QR_ECLEVEL_L, "M": QR_ECLEVEL_M, "Q": QR_ECLEVEL_Q, "H": QR_EC
 LINK_PATTERN = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 WS_CLEANER = re.compile(r"\s{2,}")
 
+PDF_IMAGE_TUNING_DEFAULTS: Dict[str, Any] = {
+    "dither": "floyd",
+    "threshold": "0.40",
+    "brightness": "1.10",
+    "contrast": "1.50",
+    "gamma": "0.75",
+    "autocontrast": True,
+}
+
+IMAGE_OPTION_FALLBACK_DEFAULTS: Dict[str, Any] = {
+    "dither": None,
+    "threshold": "0.5",
+    "diffusion": "1.0",
+    "brightness": "1.0",
+    "contrast": "1.0",
+    "gamma": "1.0",
+    "autocontrast": None,
+}
+
 
 def collapse_spaces(value: str) -> str:
     return WS_CLEANER.sub(" ", value).strip()
@@ -288,7 +308,18 @@ core_image_options = [
     click.option(
         "--autocontrast",
         is_flag=True,
-        help="Apply auto-contrast before dithering.",
+        flag_value=True,
+        default=None,
+        help="Run auto-contrast pass before applying --contrast multipliers.",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
+    ),
+    click.option(
+        "--no-autocontrast",
+        "autocontrast",
+        is_flag=True,
+        flag_value=False,
+        hidden=True,
         cls=GroupedOption,
         group=IMAGE_TUNING_GROUP,
     ),
@@ -376,7 +407,8 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     brightness = parse_comma_separated(kwargs.get("brightness"), float)
     contrast = parse_comma_separated(kwargs.get("contrast"), float)
     gamma_vals = parse_comma_separated(kwargs.get("gamma"), float)
-    autocontrast = kwargs.get("autocontrast", False)
+    autocontrast_val = kwargs.get("autocontrast", None)
+    autocontrast = bool(autocontrast_val) if autocontrast_val not in (None, "") else False
 
     if not brightness:
         brightness = [1.0]
@@ -1504,8 +1536,9 @@ def arena_channel(
 @click.option("--range", help="Page range: '1,5' (pages 1-5), '5,-1' (page 5 to end)")
 @click.option("--pages", help="Specific pages: '1,2,5' (pages 1, 2, and 5)")
 @add_image_options
-def pdf(files, format, range, pages, **kwargs):
-    """Print PDF files."""
+@click.pass_context
+def pdf(ctx, files, format, range, pages, **kwargs):
+    """Print PDF files by rendering each page to images before sending them to the printer."""
     pdf_bytes = None
     if not files:
         if not sys.stdin.isatty():
@@ -1586,8 +1619,44 @@ def pdf(files, format, range, pages, **kwargs):
         click.echo("No pages to print.", err=True)
         return
 
+    get_source = getattr(ctx, "get_parameter_source", None)
+    sentinel = object()
+
+    def user_supplied(param_name: str) -> bool:
+        if callable(get_source):
+            try:
+                source = get_source(param_name)
+            except Exception:
+                source = None
+            if source is not None:
+                if source in (ParameterSource.DEFAULT, ParameterSource.DEFAULT_MAP):
+                    return False
+                return True
+
+        default_val = IMAGE_OPTION_FALLBACK_DEFAULTS.get(param_name, sentinel)
+        if default_val is sentinel:
+            return False
+        return kwargs.get(param_name, sentinel) != default_val
+
+    for key, value in PDF_IMAGE_TUNING_DEFAULTS.items():
+        if key == "autocontrast":
+            if not user_supplied(key):
+                kwargs[key] = bool(value)
+            continue
+        if not user_supplied(key):
+            kwargs[key] = value
+
     config = create_image_config(**kwargs)
     print_with_images(config, images, names=names, heading=kwargs["heading"])
+
+
+for param in pdf.params:
+    if isinstance(param, click.Option) and param.name == "autocontrast":
+        if "--autocontrast" in param.opts:
+            param.hidden = True
+        if "--no-autocontrast" in param.opts:
+            param.hidden = False
+            param.help = "Skip the auto-contrast pre-pass; only --contrast multipliers are applied."
 
 
 @cli.group(cls=GroupedGroup)

@@ -4,6 +4,8 @@ from typing import Iterable, List, Optional, Tuple, Union
 from pdf2image import convert_from_bytes
 from PIL import Image
 
+DEFAULT_PDF_DPI = 300
+
 
 def filter_pages(
     pages: List[Image.Image], page_filter: Optional[Tuple]
@@ -42,7 +44,7 @@ def pdf_to_images(
     for path in pdf_paths:
         try:
             with open(path, "rb") as fh:
-                pages = convert_from_bytes(fh.read())
+                pages = convert_from_bytes(fh.read(), dpi=DEFAULT_PDF_DPI)
 
             filtered_pages = filter_pages(pages, page_filter)
 
