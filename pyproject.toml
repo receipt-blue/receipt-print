@@ -1,6 +1,6 @@
 [project]
 name = "receipt-print"
-version = "0.0.1"
+version = "0.1.0"
 description = "receipt printer CLI"
 authors = [
   { name = "jmpaz" }
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jmpaz/receipt-print"
+Homepage = "https://github.com/receipt-blue/receipt-print"
 
 [project.scripts]
 receipt-print = "receipt_print.cli:main"
