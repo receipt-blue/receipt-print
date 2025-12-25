@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import sys
+from urllib.parse import urlparse
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,6 +15,7 @@ from tempfile import NamedTemporaryFile
 
 import click
 from click.core import ParameterSource
+import requests
 from PIL import Image
 from escpos.escpos import QR_ECLEVEL_H, QR_ECLEVEL_L, QR_ECLEVEL_M, QR_ECLEVEL_Q
 
@@ -24,6 +26,8 @@ from .arena import (
     ArenaNotFound,
     ArenaPrintJob,
     ArenaUnauthorized,
+    MEDIA_TIMEOUT,
+    USER_AGENT,
     ChannelIterator,
     block_attachment,
     block_class,
@@ -573,6 +577,14 @@ def build_media_options(
     return opts, missing_ffmpeg
 
 
+def is_http_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def parse_list_option(value: Optional[str]) -> Optional[List[str]]:
     if not value:
         return None
@@ -900,8 +912,13 @@ def image(files, **kwargs):
             except Exception:
                 txt = ""
             parts = shlex.split(txt)
-            if parts and all(os.path.exists(os.path.expanduser(p)) for p in parts):
-                files = [os.path.expanduser(p) for p in parts]
+            if parts and all(
+                is_http_url(p) or os.path.exists(os.path.expanduser(p))
+                for p in parts
+            ):
+                files = [
+                    p if is_http_url(p) else os.path.expanduser(p) for p in parts
+                ]
             else:
                 img_bytes = data if data else None
         else:
@@ -917,27 +934,46 @@ def image(files, **kwargs):
             sys.exit(1)
     else:
         exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
-        img_files = []
+        images = []
+        names = []
         for p in files:
+            if is_http_url(p):
+                try:
+                    response = requests.get(
+                        p, timeout=MEDIA_TIMEOUT, headers={"User-Agent": USER_AGENT}
+                    )
+                    response.raise_for_status()
+                except requests.RequestException as exc:
+                    click.echo(f"Could not download image {p}: {exc}", err=True)
+                    sys.exit(1)
+                try:
+                    images.append(load_image_from_bytes(response.content))
+                except Exception as exc:
+                    click.echo(f"Invalid image data from {p}: {exc}", err=True)
+                    sys.exit(1)
+                names.append(p)
+                continue
+
             if os.path.isdir(p):
                 for e in sorted(os.listdir(p)):
                     if e.lower().endswith(exts):
-                        img_files.append(os.path.join(p, e))
-            else:
-                if not os.path.isfile(p):
-                    click.echo(f"missing file: {p}", err=True)
-                    sys.exit(1)
-                if not p.lower().endswith(exts):
-                    click.echo(f"unsupported file type: {p}", err=True)
-                    sys.exit(1)
-                img_files.append(p)
+                        img_path = os.path.join(p, e)
+                        images.append(Image.open(img_path))
+                        names.append(img_path)
+                continue
 
-        if not img_files:
+            if not os.path.isfile(p):
+                click.echo(f"missing file: {p}", err=True)
+                sys.exit(1)
+            if not p.lower().endswith(exts):
+                click.echo(f"unsupported file type: {p}", err=True)
+                sys.exit(1)
+            images.append(Image.open(p))
+            names.append(p)
+
+        if not images:
             click.echo("No usable images found.", err=True)
             sys.exit(1)
-
-        images = [Image.open(f) for f in img_files]
-        names = img_files
 
     config = create_image_config(**kwargs)
     print_with_images(config, images, names=names, heading=kwargs["heading"])

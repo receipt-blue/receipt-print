@@ -31,6 +31,7 @@ receipt-print cat file1.txt file2.txt
 Print images:
 ```bash
 receipt-print image img1.png img2.png
+receipt-print image https://example.com/photo.jpg
 cat image_paths.txt | receipt-print image
 pbpaste | receipt-print image  # clipboard file or path
 ```
@@ -63,4 +64,3 @@ Configure using environment variables ([see python-escpos documentation](https:/
 - `RP_HOST`: Network printer IP address (optional, fallback if USB fails)
 - `RP_CHAR_WIDTH`: Character width per line (default: 72)
 - `RP_MAX_LINES`: Maximum lines allowed without confirmation (default: 40)
-
