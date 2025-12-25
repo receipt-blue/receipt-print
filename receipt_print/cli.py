@@ -53,6 +53,8 @@ from .printer import (
     cat_files,
     connect_printer,
     count_lines,
+    env_no_cut,
+    maybe_cut,
     print_text,
     sanitize_output,
 )
@@ -227,6 +229,19 @@ def parse_comma_separated(value, converter, validator=None):
     return items
 
 
+def resolve_no_cut(ctx: Optional[click.Context], no_cut: bool) -> bool:
+    if env_no_cut():
+        return True
+    if no_cut:
+        return True
+    parent = ctx.parent if ctx else None
+    while parent:
+        if parent.params.get("no_cut"):
+            return True
+        parent = parent.parent
+    return False
+
+
 def validate_method(value):
     return value.lower() in {"raster", "column", "graphics"}
 
@@ -259,6 +274,17 @@ PDF_GROUP = "PDF handling"
 ARENA_CONTENT_GROUP = "content filters"
 QR_GROUP = "QR codes"
 NETWORK_GROUP = "cache, networking"
+
+
+def add_no_cut_option(func):
+    return click.option(
+        "--no-cut",
+        is_flag=True,
+        help="Skip cutting the paper after printing.",
+        cls=GroupedOption,
+        group=OUTPUT_GROUP,
+    )(func)
+
 
 core_image_options = [
     click.option(
@@ -802,7 +828,9 @@ def compute_channel_heading(meta: Optional[Dict[str, Any]]) -> List[str]:
     return [f"{user_name} /", title]
 
 
-def print_with_images(config: ImageProcessingConfig, images, names=None, heading=None):
+def print_with_images(
+    config: ImageProcessingConfig, images, names=None, heading=None, no_cut: bool = False
+):
     """Print images with common workflow"""
     printer = connect_printer()
 
@@ -832,19 +860,21 @@ def print_with_images(config: ImageProcessingConfig, images, names=None, heading
         debug=config.debug,
         spacing=config.spacing,
         names=names,
+        no_cut=no_cut,
     )
 
-    printer.cut()
+    maybe_cut(printer, no_cut=no_cut)
     printer.close()
 
 
 @click.group(cls=GroupedGroup, invoke_without_command=True)
+@add_no_cut_option
 @click.pass_context
-def cli(ctx):
+def cli(ctx, no_cut):
     """Print text or images to a receipt printer."""
     if ctx.invoked_subcommand is None:
         if not sys.stdin.isatty():
-            print_text(sys.stdin.read())
+            print_text(sys.stdin.read(), no_cut=resolve_no_cut(ctx, no_cut))
         else:
             click.echo(ctx.get_help())
             sys.exit(1)
@@ -855,17 +885,21 @@ def cli(ctx):
 @click.option(
     "-l", "--lines", is_flag=True, help="Join args with newlines instead of spaces."
 )
-def text(text, lines):
+@add_no_cut_option
+@click.pass_context
+def text(ctx, text, lines, no_cut):
     """Print literal text."""
     txt = "\n".join(text) if lines else " ".join(text)
-    print_text(txt)
+    print_text(txt, no_cut=resolve_no_cut(ctx, no_cut))
 
 
 @cli.command()
 @click.argument("files", nargs=-1, required=True)
-def cat(files):
+@add_no_cut_option
+@click.pass_context
+def cat(ctx, files, no_cut):
     """Print files' contents."""
-    cat_files(files)
+    cat_files(files, no_cut=resolve_no_cut(ctx, no_cut))
 
 
 @cli.command()
@@ -892,16 +926,20 @@ def count(files):
 @cli.command()
 @click.argument("commands", nargs=-1, required=True)
 @click.option("--no-wrap", is_flag=True, help="Standard capture instead of PTY wrap.")
-def shell(commands, no_wrap):
+@add_no_cut_option
+@click.pass_context
+def shell(ctx, commands, no_wrap, no_cut):
     """Run shell commands and print output."""
     out = run_shell_commands(commands, wrap_tty=not no_wrap, columns=CHAR_WIDTH)
-    print_text(out)
+    print_text(out, no_cut=resolve_no_cut(ctx, no_cut))
 
 
 @cli.command()
 @click.argument("files", nargs=-1)
 @add_image_options
-def image(files, **kwargs):
+@add_no_cut_option
+@click.pass_context
+def image(ctx, files, no_cut, **kwargs):
     """Print one or more images."""
     img_bytes = None
     if not files:
@@ -976,7 +1014,13 @@ def image(files, **kwargs):
             sys.exit(1)
 
     config = create_image_config(**kwargs)
-    print_with_images(config, images, names=names, heading=kwargs["heading"])
+    print_with_images(
+        config,
+        images,
+        names=names,
+        heading=kwargs["heading"],
+        no_cut=resolve_no_cut(ctx, no_cut),
+    )
 
 
 @cli.group(name="are.na", cls=GroupedGroup)
@@ -1013,6 +1057,7 @@ def arena_group():
     cls=GroupedOption,
     group=OUTPUT_GROUP,
 )
+@add_no_cut_option
 @click.option(
     "--video",
     type=click.Choice(["frame", "preview"]),
@@ -1077,7 +1122,9 @@ def arena_group():
     cls=GroupedOption,
     group=NETWORK_GROUP,
 )
+@click.pass_context
 def arena_block(
+    ctx,
     blocks,
     method,
     dither,
@@ -1102,8 +1149,10 @@ def arena_block(
     qr_correction,
     no_cache,
     debug,
+    no_cut,
 ):
     """Print one or more Are.na blocks."""
+    effective_no_cut = resolve_no_cut(ctx, no_cut)
     media_opts, missing_ffmpeg = build_media_options(
         video, ffmpeg, pdf, pdf_pages, pdf_range
     )
@@ -1144,6 +1193,7 @@ def arena_block(
         config.spacing,
         footer,
         debug=config.debug,
+        no_cut=effective_no_cut,
     )
 
     if missing_ffmpeg and video == "frame":
@@ -1199,7 +1249,7 @@ def arena_block(
 
         if printed_any:
             job.print_footer()
-            printer.cut()
+            maybe_cut(printer, no_cut=effective_no_cut)
     finally:
         printer.close()
         client.close()
@@ -1305,10 +1355,11 @@ def arena_block(
 @click.option(
     "--cut-between",
     is_flag=True,
-    help="Cut between each printed image; outputs images only.",
+    help="Cut between each printed image; outputs images only (incompatible with --no-cut).",
     cls=GroupedOption,
     group=OUTPUT_GROUP,
 )
+@add_no_cut_option
 @click.option(
     "--qr",
     is_flag=True,
@@ -1347,7 +1398,9 @@ def arena_block(
     cls=GroupedOption,
     group=NETWORK_GROUP,
 )
+@click.pass_context
 def arena_channel(
+    ctx,
     channel,
     method,
     dither,
@@ -1379,8 +1432,16 @@ def arena_channel(
     sort,
     no_cache,
     debug,
+    no_cut,
 ):
     """Print all blocks in an Are.na channel."""
+    if cut_between and env_no_cut():
+        raise click.UsageError(
+            "RP_NO_CUT=1 disables cutting; --cut-between is incompatible."
+        )
+    effective_no_cut = resolve_no_cut(ctx, no_cut)
+    if cut_between and effective_no_cut:
+        raise click.UsageError("--no-cut is mutually exclusive with --cut-between.")
     try:
         ref = parse_channel_identifier(channel)
     except ArenaError as exc:
@@ -1481,6 +1542,7 @@ def arena_channel(
         debug=config.debug,
         auto_orient=cut_mode,
         cut_between=cut_mode,
+        no_cut=effective_no_cut,
     )
 
     if missing_ffmpeg and video == "frame":
@@ -1555,7 +1617,7 @@ def arena_channel(
 
         if not cut_mode:
             job.print_footer()
-            printer.cut()
+            maybe_cut(printer, no_cut=effective_no_cut)
     finally:
         printer.close()
         client.close()
@@ -1572,10 +1634,12 @@ def arena_channel(
 @click.option("--range", help="Page range: '1,5' (pages 1-5), '5,-1' (page 5 to end)")
 @click.option("--pages", help="Specific pages: '1,2,5' (pages 1, 2, and 5)")
 @add_image_options
+@add_no_cut_option
 @click.pass_context
-def pdf(ctx, files, format, range, pages, **kwargs):
+def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
     """Print PDF files by rendering each page to images before sending them to the printer."""
     pdf_bytes = None
+    effective_no_cut = resolve_no_cut(ctx, no_cut)
     if not files:
         if not sys.stdin.isatty():
             data = sys.stdin.buffer.read()
@@ -1635,7 +1699,7 @@ def pdf(ctx, files, format, range, pages, **kwargs):
                 os.unlink(tmp_path)
         else:
             txt = pdf_to_text(files, page_filter)
-        print_text(txt)
+        print_text(txt, no_cut=effective_no_cut)
         return
 
     from .pdf_utils import pdf_to_images
@@ -1683,7 +1747,13 @@ def pdf(ctx, files, format, range, pages, **kwargs):
             kwargs[key] = value
 
     config = create_image_config(**kwargs)
-    print_with_images(config, images, names=names, heading=kwargs["heading"])
+    print_with_images(
+        config,
+        images,
+        names=names,
+        heading=kwargs["heading"],
+        no_cut=effective_no_cut,
+    )
 
 
 for param in pdf.params:

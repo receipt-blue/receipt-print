@@ -54,6 +54,13 @@ receipt-print shell "ls -l" "git status"
 receipt-print shell "hostname -I | awk '{print $1}'"
 ```
 
+Skip cutting:
+```bash
+receipt-print text --no-cut "hello"
+cat file.txt | receipt-print --no-cut
+RP_NO_CUT=1 receipt-print image img1.png
+```
+
 ## Configuration
 
 Configure using environment variables ([see python-escpos documentation](https://python-escpos.readthedocs.io/en/latest/user/usage.html)):
@@ -64,3 +71,4 @@ Configure using environment variables ([see python-escpos documentation](https:/
 - `RP_HOST`: Network printer IP address (optional, fallback if USB fails)
 - `RP_CHAR_WIDTH`: Character width per line (default: 72)
 - `RP_MAX_LINES`: Maximum lines allowed without confirmation (default: 40)
+- `RP_NO_CUT`: Set to `1` to disable automatic cutting

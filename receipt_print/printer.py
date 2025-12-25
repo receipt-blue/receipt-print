@@ -68,6 +68,21 @@ def enforce_line_limit(n: int) -> None:
         sys.exit(1)
 
 
+def env_no_cut() -> bool:
+    return os.getenv("RP_NO_CUT", "0") == "1"
+
+
+def should_cut(no_cut: bool = False) -> bool:
+    if env_no_cut():
+        return False
+    return not no_cut
+
+
+def maybe_cut(printer, no_cut: bool = False) -> None:
+    if should_cut(no_cut):
+        printer.cut()
+
+
 def connect_printer():
     """connect to the ESC/POS printer"""
     skip_usb = os.getenv("RP_NO_USB", "0") == "1"
@@ -101,7 +116,7 @@ def connect_printer():
     return p
 
 
-def print_text(text: str):
+def print_text(text: str, no_cut: bool = False):
     """print arbitrary text with line-limit warnings"""
     text = sanitize_output(text)
     n = count_lines(text, CHAR_WIDTH)
@@ -110,11 +125,11 @@ def print_text(text: str):
     printer = connect_printer()
     printer.set(align="left", font="a")
     printer.text(text)
-    printer.cut()
+    maybe_cut(printer, no_cut=no_cut)
     printer.close()
 
 
-def cat_files(files: List[str]):
+def cat_files(files: List[str], no_cut: bool = False):
     buf = []
     for f in files:
         try:
@@ -123,4 +138,4 @@ def cat_files(files: List[str]):
         except Exception as e:
             sys.stderr.write(f"Error reading {f}: {e}\n")
             sys.exit(1)
-    print_text("".join(buf))
+    print_text("".join(buf), no_cut=no_cut)

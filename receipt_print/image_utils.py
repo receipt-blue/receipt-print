@@ -150,6 +150,7 @@ def print_images_from_pil(
     autocontrast: bool = False,
     auto_orient: bool = False,
     cut_between: bool = False,
+    no_cut: bool = False,
 ) -> int:
     """print pre-loaded PIL images and return next caption index"""
 
@@ -331,7 +332,8 @@ def print_images_from_pil(
             sys.stderr.write(f"Error printing {name}: {e}\n")
 
         if cut_between:
-            printer.cut()
+            if not no_cut:
+                printer.cut()
             printer.set(align="left")
 
     if footer_text and not cut_between:
@@ -361,6 +363,7 @@ def print_images(
     contrast_list: Optional[List[float]] = None,
     gamma_list: Optional[List[float]] = None,
     autocontrast: bool = False,
+    no_cut: bool = False,
 ):
     images: List[Image.Image] = []
     names: List[str] = []
@@ -396,4 +399,5 @@ def print_images(
         contrast_list=contrast_list,
         gamma_list=gamma_list,
         autocontrast=autocontrast,
+        no_cut=no_cut,
     )
