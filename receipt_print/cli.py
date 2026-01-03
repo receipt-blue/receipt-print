@@ -1237,7 +1237,7 @@ def image(ctx, files, no_cut, **kwargs):
 @click.option(
     "--qr-size",
     type=click.IntRange(min=1),
-    default=3,
+    default=2,
     show_default=True,
     help="QR module size (printer dependent).",
     cls=GroupedOption,
@@ -1995,14 +1995,14 @@ def imessage():
     type=click.IntRange(min=0),
     default=0,
     show_default=True,
-    help="Process the last N incoming messages on first run.",
+    help="Process the last N messages on first run.",
     cls=GroupedOption,
     group=IMESSAGE_GROUP,
 )
 @click.option(
     "--verbose",
     is_flag=True,
-    help="Log all incoming messages (including skipped).",
+    help="Log all messages (including skipped).",
     cls=GroupedOption,
     group=IMESSAGE_GROUP,
 )
@@ -2176,7 +2176,7 @@ def imessage_listen(
     type=click.IntRange(min=1, max=200),
     default=5,
     show_default=True,
-    help="Inspect the last N incoming messages.",
+    help="Inspect the last N messages.",
     cls=GroupedOption,
     group=IMESSAGE_GROUP,
 )
@@ -2228,7 +2228,7 @@ def imessage_test(db, tail):
         conn.close()
 
     if not summaries:
-        click.echo("Latest incoming message: none found.")
+        click.echo("Latest message: none found.")
         return
 
     def preview(text: str) -> str:
@@ -2239,7 +2239,7 @@ def imessage_test(db, tail):
             return f"{cleaned[:117]}..."
         return cleaned
 
-    click.echo(f"Latest incoming messages (most recent last, count={len(summaries)}):")
+    click.echo(f"Latest messages (most recent last, count={len(summaries)}):")
     for summary in reversed(summaries):
         decoded = extract_text_from_attributed_body(summary.attributed_body) or ""
         text_val = summary.text or ""

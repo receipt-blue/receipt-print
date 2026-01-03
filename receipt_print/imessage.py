@@ -133,7 +133,7 @@ def open_chat_db(path: Path) -> sqlite3.Connection:
 def fetch_latest_incoming_rowid(conn: sqlite3.Connection) -> int:
     row = conn.execute(
         "SELECT m.ROWID AS rowid FROM message m "
-        "WHERE m.is_from_me = 0 ORDER BY m.ROWID DESC LIMIT 1"
+        "ORDER BY m.ROWID DESC LIMIT 1"
     ).fetchone()
     if not row:
         return 0
@@ -147,7 +147,7 @@ def fetch_latest_incoming_message(
         "SELECT m.ROWID AS rowid, m.text AS text, "
         "m.attributedBody AS attributed_body, m.date AS date "
         "FROM message m "
-        "WHERE m.is_from_me = 0 ORDER BY m.ROWID DESC LIMIT 1"
+        "ORDER BY m.ROWID DESC LIMIT 1"
     ).fetchone()
     if not row:
         return None
@@ -166,7 +166,7 @@ def fetch_recent_incoming_messages(
         "SELECT m.ROWID AS rowid, m.text AS text, "
         "m.attributedBody AS attributed_body, m.date AS date "
         "FROM message m "
-        "WHERE m.is_from_me = 0 ORDER BY m.ROWID DESC LIMIT ?",
+        "ORDER BY m.ROWID DESC LIMIT ?",
         (limit,),
     ).fetchall()
     summaries: List[IncomingSummary] = []
@@ -187,7 +187,7 @@ def bootstrap_last_rowid(conn: sqlite3.Connection, backfill: int) -> int:
         return fetch_latest_incoming_rowid(conn)
     row = conn.execute(
         "SELECT m.ROWID AS rowid FROM message m "
-        "WHERE m.is_from_me = 0 ORDER BY m.ROWID DESC LIMIT 1 OFFSET ?",
+        "ORDER BY m.ROWID DESC LIMIT 1 OFFSET ?",
         (backfill - 1,),
     ).fetchone()
     if not row:
@@ -207,7 +207,7 @@ def fetch_messages(
         "JOIN chat_message_join cmj ON m.ROWID = cmj.message_id "
         "JOIN chat c ON cmj.chat_id = c.ROWID "
         "LEFT JOIN handle h ON m.handle_id = h.ROWID "
-        "WHERE m.is_from_me = 0 AND m.ROWID > ? "
+        "WHERE m.ROWID > ? "
         "ORDER BY m.ROWID ASC LIMIT ?",
         (since_rowid, limit),
     ).fetchall()
@@ -631,10 +631,15 @@ def print_message(
         if not printed_media and body_text:
             job.print_text(body_text, align="left", font="a")
 
-        if sender or timestamp:
+        if not contacts and (sender or timestamp):
             job.line_break(1)
             if sender:
-                job.print_text(f"- {sender}", align="right", font="a")
+                job.print_text(
+                    f"- {sender}",
+                    align="right",
+                    font="a",
+                    bold=True,
+                )
             if timestamp:
                 job.print_text(timestamp, align="right", font="a")
 

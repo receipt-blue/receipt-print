@@ -404,6 +404,7 @@ def print_contact_image(
     *,
     wrap_mode: str,
     align: str,
+    scale: float = 1.0,
     spacing: int = 1,
     caption: Optional[str] = None,
 ) -> None:
@@ -413,7 +414,7 @@ def print_contact_image(
     print_images_from_pil(
         printer,
         [image],
-        [1.0],
+        [scale],
         [align],
         ["raster"],
         None,
@@ -485,7 +486,7 @@ def print_contact_card(
             printer,
             card_img,
             wrap_mode=wrap_mode,
-            align="left",
+            align="center",
             spacing=spacing,
             caption=_normalize_caption(caption),
         )
@@ -493,21 +494,22 @@ def print_contact_card(
 
     panel = build_contact_panel(contact, width=CHAR_WIDTH, wrap_mode=wrap_mode)
     enforce_line_limit(count_lines("\n".join(panel.lines), panel.width))
+
+    if photo_to_use is not None:
+        print_contact_image(
+            printer,
+            photo_to_use,
+            wrap_mode=wrap_mode,
+            align="left",
+            scale=0.45,
+            spacing=spacing,
+        )
+
     printer.set(align="left", font="a", bold=False, normal_textsize=True)
     for line_idx, line in enumerate(panel.lines):
         printer.set(bold=line_idx in panel.bold_line_indices)
         printer.text(_ensure_trailing_newline(line))
     printer.set(align="left", font="a", bold=False, normal_textsize=True)
-
-    if photo_to_use is not None:
-        printer.text("\n")
-        print_contact_image(
-            printer,
-            photo_to_use,
-            wrap_mode=wrap_mode,
-            align="center",
-            spacing=spacing,
-        )
 
     printer.set(align="right", font="a", bold=False)
     try:
