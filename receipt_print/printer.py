@@ -2,7 +2,7 @@ import os
 import platform
 import re
 import sys
-from typing import List
+from typing import List, Optional, Tuple
 
 from escpos.exceptions import DeviceNotFoundError, USBNotFoundError
 from escpos.printer import Network, Usb
@@ -49,6 +49,22 @@ def count_lines(text: str, width: int) -> int:
         else:
             total += (len(ln) + width - 1) // width
     return total
+
+
+def normalize_text_size(
+    text_width: Optional[int], text_height: Optional[int]
+) -> Optional[Tuple[int, int]]:
+    if text_width is None and text_height is None:
+        return None
+    width = text_width if text_width is not None else 1
+    height = text_height if text_height is not None else 1
+    if not (1 <= width <= 8 and 1 <= height <= 8):
+        raise ValueError("Text size multipliers must be between 1 and 8.")
+    return width, height
+
+
+def scaled_char_width(width: int, multiplier: int) -> int:
+    return max(1, width // multiplier)
 
 
 def enforce_line_limit(n: int) -> None:
@@ -116,15 +132,39 @@ def connect_printer():
     return p
 
 
-def print_text(text: str, no_cut: bool = False):
+def print_text(
+    text: str,
+    no_cut: bool = False,
+    *,
+    text_width: Optional[int] = None,
+    text_height: Optional[int] = None,
+):
     """print arbitrary text with line-limit warnings"""
     text = sanitize_output(text)
-    n = count_lines(text, CHAR_WIDTH)
+    size = normalize_text_size(text_width, text_height)
+    if size:
+        width_mult, height_mult = size
+        line_width = scaled_char_width(CHAR_WIDTH, width_mult)
+        n = count_lines(text, line_width) * height_mult
+    else:
+        n = count_lines(text, CHAR_WIDTH)
     enforce_line_limit(n)
 
     printer = connect_printer()
-    printer.set(align="left", font="a")
+    if size:
+        width_mult, height_mult = size
+        printer.set(
+            align="left",
+            font="a",
+            custom_size=True,
+            width=width_mult,
+            height=height_mult,
+        )
+    else:
+        printer.set(align="left", font="a")
     printer.text(text)
+    if size:
+        printer.set(normal_textsize=True)
     maybe_cut(printer, no_cut=no_cut)
     printer.close()
 

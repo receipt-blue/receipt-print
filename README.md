@@ -21,6 +21,7 @@ Print text:
 ```bash
 receipt-print text "hello" "world"
 receipt-print text -l "line 1" "line 2"  # use newlines instead of spaces
+receipt-print text --size 3 "big text"
 ```
 
 Print file content:

@@ -269,6 +269,7 @@ IMAGE_TUNING_GROUP = "image tuning"
 IMAGE_LAYOUT_GROUP = "layout"
 DIAGNOSTICS_GROUP = "diagnostics"
 OUTPUT_GROUP = "output control"
+TEXT_GROUP = "text formatting"
 VIDEO_GROUP = "video handling"
 PDF_GROUP = "PDF handling"
 ARENA_CONTENT_GROUP = "content filters"
@@ -885,12 +886,47 @@ def cli(ctx, no_cut):
 @click.option(
     "-l", "--lines", is_flag=True, help="Join args with newlines instead of spaces."
 )
+@click.option(
+    "--size",
+    type=click.IntRange(1, 8),
+    help="Text size multiplier (1-8). Sets width and height together.",
+    cls=GroupedOption,
+    group=TEXT_GROUP,
+)
+@click.option(
+    "--width",
+    "text_width",
+    type=click.IntRange(1, 8),
+    help="Text width multiplier (1-8).",
+    cls=GroupedOption,
+    group=TEXT_GROUP,
+)
+@click.option(
+    "--height",
+    "text_height",
+    type=click.IntRange(1, 8),
+    help="Text height multiplier (1-8).",
+    cls=GroupedOption,
+    group=TEXT_GROUP,
+)
 @add_no_cut_option
 @click.pass_context
-def text(ctx, text, lines, no_cut):
+def text(ctx, text, lines, size, text_width, text_height, no_cut):
     """Print literal text."""
-    txt = "\n".join(text) if lines else " ".join(text)
-    print_text(txt, no_cut=resolve_no_cut(ctx, no_cut))
+    if size is not None and (text_width is not None or text_height is not None):
+        raise click.UsageError("--size is mutually exclusive with --width/--height.")
+    if size is not None:
+        text_width = size
+        text_height = size
+    size_active = text_width is not None or text_height is not None
+    use_lines = lines or (size_active and len(text) > 1)
+    txt = "\n".join(text) if use_lines else " ".join(text)
+    print_text(
+        txt,
+        no_cut=resolve_no_cut(ctx, no_cut),
+        text_width=text_width,
+        text_height=text_height,
+    )
 
 
 @cli.command()
