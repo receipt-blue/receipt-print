@@ -16,6 +16,8 @@ CHAR_WIDTH = int(os.getenv("RP_CHAR_WIDTH", "42"))
 CHARCODE = os.getenv("RP_CHARCODE", "CP437")
 MAX_LINES = int(os.getenv("RP_MAX_LINES", "40"))
 DOTS_PER_LINE = 24  # ~1 text line per 24 px
+WRAP_MODES = {"hyphen", "word", "none"}
+WRAP_TOKEN_RE = re.compile(r"\S+|\s+")
 
 
 def remove_ansi(text: str) -> str:
@@ -65,6 +67,94 @@ def normalize_text_size(
 
 def scaled_char_width(width: int, multiplier: int) -> int:
     return max(1, width // multiplier)
+
+
+def _split_long_word(word: str, width: int, hyphenate: bool) -> List[str]:
+    if width <= 0:
+        return [word]
+    if not hyphenate or width == 1:
+        return [word[i : i + width] for i in range(0, len(word), width)]
+    chunks = []
+    while len(word) > width:
+        chunks.append(word[: width - 1] + "-")
+        word = word[width - 1 :]
+    if word:
+        chunks.append(word)
+    return chunks
+
+
+def wrap_text(text: str, width: int, mode: Optional[str]) -> str:
+    mode = (mode or "hyphen").lower()
+    if mode not in WRAP_MODES or mode == "none" or width <= 0:
+        return text
+    hyphenate = mode == "hyphen" and width > 1
+    lines = text.split("\n")
+    wrapped_lines: List[str] = []
+    for line in lines:
+        if line == "":
+            wrapped_lines.append("")
+            continue
+        tokens = WRAP_TOKEN_RE.findall(line)
+        current = ""
+        for token in tokens:
+            if token.isspace():
+                if not current:
+                    if len(token) <= width:
+                        current = token
+                    else:
+                        for idx in range(0, len(token), width):
+                            chunk = token[idx : idx + width]
+                            if idx + width >= len(token):
+                                current = chunk
+                            else:
+                                wrapped_lines.append(chunk)
+                    continue
+                if len(current) + len(token) <= width:
+                    current += token
+                else:
+                    wrapped_lines.append(current.rstrip())
+                    current = ""
+                continue
+
+            if len(current) + len(token) <= width:
+                current += token
+                continue
+
+            if not current:
+                if len(token) <= width:
+                    current = token
+                else:
+                    chunks = _split_long_word(token, width, hyphenate)
+                    wrapped_lines.extend(chunks[:-1])
+                    current = chunks[-1] if chunks else ""
+                continue
+
+            if not hyphenate:
+                wrapped_lines.append(current.rstrip())
+                current = ""
+                if len(token) <= width:
+                    current = token
+                else:
+                    chunks = _split_long_word(token, width, hyphenate)
+                    wrapped_lines.extend(chunks[:-1])
+                    current = chunks[-1] if chunks else ""
+                continue
+
+            remaining = width - len(current)
+            if remaining > 1:
+                current += token[: remaining - 1] + "-"
+                wrapped_lines.append(current)
+                token = token[remaining - 1 :]
+            else:
+                wrapped_lines.append(current.rstrip())
+            current = ""
+            if token:
+                chunks = _split_long_word(token, width, hyphenate)
+                wrapped_lines.extend(chunks[:-1])
+                current = chunks[-1] if chunks else ""
+        if current:
+            wrapped_lines.append(current.rstrip())
+    return "\n".join(wrapped_lines)
 
 
 def enforce_line_limit(n: int) -> None:
@@ -138,6 +228,7 @@ def print_text(
     *,
     text_width: Optional[int] = None,
     text_height: Optional[int] = None,
+    wrap_mode: str = "hyphen",
 ):
     """print arbitrary text with line-limit warnings"""
     text = sanitize_output(text)
@@ -145,9 +236,11 @@ def print_text(
     if size:
         width_mult, height_mult = size
         line_width = scaled_char_width(CHAR_WIDTH, width_mult)
-        n = count_lines(text, line_width) * height_mult
+        wrapped_text = wrap_text(text, line_width, wrap_mode)
+        n = count_lines(wrapped_text, line_width) * height_mult
     else:
-        n = count_lines(text, CHAR_WIDTH)
+        wrapped_text = wrap_text(text, CHAR_WIDTH, wrap_mode)
+        n = count_lines(wrapped_text, CHAR_WIDTH)
     enforce_line_limit(n)
 
     printer = connect_printer()
@@ -162,14 +255,14 @@ def print_text(
         )
     else:
         printer.set(align="left", font="a")
-    printer.text(text)
+    printer.text(wrapped_text)
     if size:
         printer.set(normal_textsize=True)
     maybe_cut(printer, no_cut=no_cut)
     printer.close()
 
 
-def cat_files(files: List[str], no_cut: bool = False):
+def cat_files(files: List[str], no_cut: bool = False, *, wrap_mode: str = "hyphen"):
     buf = []
     for f in files:
         try:
@@ -178,4 +271,4 @@ def cat_files(files: List[str], no_cut: bool = False):
         except Exception as e:
             sys.stderr.write(f"Error reading {f}: {e}\n")
             sys.exit(1)
-    print_text("".join(buf), no_cut=no_cut)
+    print_text("".join(buf), no_cut=no_cut, wrap_mode=wrap_mode)

@@ -9,7 +9,7 @@ import numpy as np
 from escpos.exceptions import ImageWidthError
 from PIL import Image, ImageEnhance, ImageOps
 
-from .printer import DOTS_PER_LINE, MAX_LINES
+from .printer import CHAR_WIDTH, DOTS_PER_LINE, MAX_LINES, wrap_text
 
 
 def parse_caption_csv(captions_str: Optional[str]) -> List[str]:
@@ -151,6 +151,7 @@ def print_images_from_pil(
     auto_orient: bool = False,
     cut_between: bool = False,
     no_cut: bool = False,
+    wrap_mode: str = "hyphen",
 ) -> int:
     """print pre-loaded PIL images and return next caption index"""
 
@@ -187,6 +188,12 @@ def print_images_from_pil(
         "column": "bitImageColumn",
         "graphics": "graphics",
     }
+
+    def print_wrapped(text: str) -> None:
+        wrapped = wrap_text(text, CHAR_WIDTH, wrap_mode)
+        if not wrapped.endswith("\n"):
+            wrapped += "\n"
+        printer.text(wrapped)
 
     def get(lst, i):
         return lst[i] if i < len(lst) else lst[-1]
@@ -281,8 +288,8 @@ def print_images_from_pil(
 
         if debug:
             printer.set(align="left")
-            printer.textln(f"[DEBUG] file={name}")
-            printer.textln(
+            print_wrapped(f"[DEBUG] file={name}")
+            print_wrapped(
                 f"[DEBUG] align={al}, scale={scale:.2f}, "
                 f"method={method}, dither={dith}, "
                 f"threshold={thresh:.2f}, diffusion={diff:.2f}, "
@@ -298,7 +305,7 @@ def print_images_from_pil(
                 if raw:
                     dt = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
                     printer.set(align="left", font="b", bold=True)
-                    printer.text(dt.strftime(ts_format) + "\n")
+                    print_wrapped(dt.strftime(ts_format))
             except Exception:
                 pass
 
@@ -318,7 +325,7 @@ def print_images_from_pil(
             if caption_text:
                 printer.text("\n")
                 printer.set(align="center", font="b", bold=True)
-                printer.text(caption_text + "\n")
+                print_wrapped(caption_text)
                 printer.set(align="left")
                 if idx < len(processed) - 1:
                     printer.text("\n")
@@ -339,7 +346,7 @@ def print_images_from_pil(
     if footer_text and not cut_between:
         printer.text("\n")
         printer.set(align="center", font="b", bold=True)
-        printer.text(footer_text + "\n")
+        print_wrapped(footer_text)
         printer.set(align="left")
 
     return caption_start + len(processed)
@@ -364,6 +371,7 @@ def print_images(
     gamma_list: Optional[List[float]] = None,
     autocontrast: bool = False,
     no_cut: bool = False,
+    wrap_mode: str = "hyphen",
 ):
     images: List[Image.Image] = []
     names: List[str] = []
@@ -399,5 +407,6 @@ def print_images(
         contrast_list=contrast_list,
         gamma_list=gamma_list,
         autocontrast=autocontrast,
+        wrap_mode=wrap_mode,
         no_cut=no_cut,
     )

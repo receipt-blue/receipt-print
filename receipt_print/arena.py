@@ -19,7 +19,14 @@ from PIL import Image
 
 from .image_utils import parse_caption_csv, print_images_from_pil
 from .pdf_utils import pdf_to_images
-from .printer import CHAR_WIDTH, count_lines, enforce_line_limit, sanitize_output
+from .printer import (
+    CHAR_WIDTH,
+    count_lines,
+    enforce_line_limit,
+    sanitize_output,
+    scaled_char_width,
+    wrap_text,
+)
 
 USER_AGENT = "receipt-print/0.0.1 (+https://github.com/jmpaz/receipt-print)"
 DEFAULT_API_BASE = os.getenv("ARENA_API_BASE", "https://api.are.na/v2")
@@ -462,6 +469,7 @@ class ArenaPrintJob:
         spacing: int,
         footer_text: Optional[str],
         debug: bool = False,
+        wrap_mode: str = "hyphen",
         auto_orient: bool = False,
         cut_between: bool = False,
         no_cut: bool = False,
@@ -482,11 +490,19 @@ class ArenaPrintJob:
         self.spacing = spacing
         self.footer_text = footer_text
         self.debug = debug
+        self.wrap_mode = wrap_mode.lower() if wrap_mode else "hyphen"
         self.caption_index = 0
         self._footer_printed = False
         self.auto_orient_images = auto_orient
         self.cut_between_images = cut_between
         self.no_cut = no_cut
+
+    def _wrap_and_count(
+        self, text: str, width_mult: int = 1, height_mult: int = 1
+    ) -> Tuple[str, int]:
+        line_width = scaled_char_width(CHAR_WIDTH, width_mult)
+        wrapped = wrap_text(text, line_width, self.wrap_mode)
+        return wrapped, count_lines(wrapped, line_width) * height_mult
 
     def print_heading(
         self,
@@ -507,7 +523,16 @@ class ArenaPrintJob:
         ]
         if not lines:
             return
-        for idx, line in enumerate(lines):
+        width_mult = 2 if double else 1
+        height_mult = 2 if double else 1
+        wrapped, line_count = self._wrap_and_count(
+            "\n".join(lines), width_mult=width_mult, height_mult=height_mult
+        )
+        if wrapped:
+            enforce_line_limit(line_count)
+        for line in wrapped.splitlines():
+            if not line:
+                continue
             self.printer.set(
                 align="left",
                 font="b",
@@ -533,9 +558,9 @@ class ArenaPrintJob:
             return
         sanitized = sanitize_output(text)
         sanitized = sanitized.encode("ascii", "ignore").decode("ascii")
-        if sanitized:
-            lines = count_lines(sanitized, CHAR_WIDTH)
-            enforce_line_limit(lines)
+        wrapped, line_count = self._wrap_and_count(sanitized)
+        if wrapped:
+            enforce_line_limit(line_count)
         self.printer.set(
             align="center",
             font="b",
@@ -544,7 +569,7 @@ class ArenaPrintJob:
             double_height=False,
             normal_textsize=True,
         )
-        self.printer.text(ensure_trailing_newline(sanitized))
+        self.printer.text(ensure_trailing_newline(wrapped))
         self.printer.set(
             align="left",
             font="a",
@@ -561,8 +586,8 @@ class ArenaPrintJob:
             return
         sanitized = sanitize_output(text)
         sanitized = sanitized.encode("ascii", "ignore").decode("ascii")
-        lines = count_lines(sanitized, CHAR_WIDTH)
-        enforce_line_limit(lines)
+        wrapped, line_count = self._wrap_and_count(sanitized)
+        enforce_line_limit(line_count)
         self.printer.set(
             align=align,
             font=font,
@@ -571,7 +596,7 @@ class ArenaPrintJob:
             double_height=False,
             normal_textsize=True,
         )
-        self.printer.text(ensure_trailing_newline(sanitized))
+        self.printer.text(ensure_trailing_newline(wrapped))
         self.printer.set(
             align="left",
             font="a",
@@ -607,6 +632,7 @@ class ArenaPrintJob:
             debug=self.debug,
             spacing=0 if self.cut_between_images else self.spacing,
             names=names,
+            wrap_mode=self.wrap_mode,
             auto_orient=self.auto_orient_images,
             cut_between=self.cut_between_images,
             no_cut=self.no_cut,

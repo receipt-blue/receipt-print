@@ -56,7 +56,9 @@ from .printer import (
     env_no_cut,
     maybe_cut,
     print_text,
+    scaled_char_width,
     sanitize_output,
+    wrap_text,
 )
 from .shell import run_shell_commands
 
@@ -162,6 +164,7 @@ class ImageProcessingConfig:
     footer_text: Optional[str] = None
     debug: bool = False
     spacing: int = 1
+    wrap_mode: str = "hyphen"
 
 
 @dataclass
@@ -242,6 +245,17 @@ def resolve_no_cut(ctx: Optional[click.Context], no_cut: bool) -> bool:
     return False
 
 
+def resolve_wrap(ctx: Optional[click.Context], wrap: Optional[str]) -> str:
+    if wrap is not None:
+        return wrap
+    parent = ctx.parent if ctx else None
+    while parent:
+        if "wrap" in parent.params and parent.params.get("wrap") is not None:
+            return parent.params["wrap"]
+        parent = parent.parent
+    return "hyphen"
+
+
 def validate_method(value):
     return value.lower() in {"raster", "column", "graphics"}
 
@@ -284,6 +298,18 @@ def add_no_cut_option(func):
         help="Skip cutting the paper after printing.",
         cls=GroupedOption,
         group=OUTPUT_GROUP,
+    )(func)
+
+
+def add_wrap_option(func):
+    return click.option(
+        "--wrap",
+        type=click.Choice(["hyphen", "word", "none"], case_sensitive=False),
+        default=None,
+        show_default=False,
+        help="Wrap text: hyphen, word, or none. Default: hyphen.",
+        cls=GroupedOption,
+        group=TEXT_GROUP,
     )(func)
 
 
@@ -464,6 +490,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     if not all(v > 0 for v in gamma_vals):
         raise click.BadParameter("--gamma must be > 0")
 
+    wrap_mode = (kwargs.get("wrap") or "hyphen").lower()
     ts_fmt = None if kwargs["timestamp"].lower() == "none" else kwargs["timestamp"]
 
     return ImageProcessingConfig(
@@ -482,6 +509,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         footer_text=kwargs["footer"],
         debug=kwargs["debug"],
         spacing=kwargs["spacing"],
+        wrap_mode=wrap_mode,
     )
 
 
@@ -498,6 +526,7 @@ def create_arena_image_config(
     contrast: str,
     gamma: str,
     autocontrast: bool,
+    wrap: Optional[str],
 ) -> ImageProcessingConfig:
     """Build an ImageProcessingConfig for Are.na printing with defaults."""
     kwargs = {
@@ -517,6 +546,7 @@ def create_arena_image_config(
         "contrast": contrast,
         "gamma": gamma,
         "autocontrast": autocontrast,
+        "wrap": wrap,
     }
     return create_image_config(**kwargs)
 
@@ -837,7 +867,11 @@ def print_with_images(
 
     if heading:
         printer.set(align="center", double_height=True, double_width=True)
-        printer.text(heading + "\n")
+        heading_width = scaled_char_width(CHAR_WIDTH, 2)
+        wrapped_heading = wrap_text(heading, heading_width, config.wrap_mode)
+        if wrapped_heading and not wrapped_heading.endswith("\n"):
+            wrapped_heading += "\n"
+        printer.text(wrapped_heading)
         printer.set(align="left")
 
     from .image_utils import print_images_from_pil
@@ -861,6 +895,7 @@ def print_with_images(
         debug=config.debug,
         spacing=config.spacing,
         names=names,
+        wrap_mode=config.wrap_mode,
         no_cut=no_cut,
     )
 
@@ -869,13 +904,18 @@ def print_with_images(
 
 
 @click.group(cls=GroupedGroup, invoke_without_command=True)
+@add_wrap_option
 @add_no_cut_option
 @click.pass_context
-def cli(ctx, no_cut):
+def cli(ctx, wrap, no_cut):
     """Print text or images to a receipt printer."""
     if ctx.invoked_subcommand is None:
         if not sys.stdin.isatty():
-            print_text(sys.stdin.read(), no_cut=resolve_no_cut(ctx, no_cut))
+            print_text(
+                sys.stdin.read(),
+                no_cut=resolve_no_cut(ctx, no_cut),
+                wrap_mode=resolve_wrap(ctx, wrap),
+            )
         else:
             click.echo(ctx.get_help())
             sys.exit(1)
@@ -909,9 +949,10 @@ def cli(ctx, no_cut):
     cls=GroupedOption,
     group=TEXT_GROUP,
 )
+@add_wrap_option
 @add_no_cut_option
 @click.pass_context
-def text(ctx, text, lines, size, text_width, text_height, no_cut):
+def text(ctx, text, lines, size, text_width, text_height, wrap, no_cut):
     """Print literal text."""
     if size is not None and (text_width is not None or text_height is not None):
         raise click.UsageError("--size is mutually exclusive with --width/--height.")
@@ -926,21 +967,29 @@ def text(ctx, text, lines, size, text_width, text_height, no_cut):
         no_cut=resolve_no_cut(ctx, no_cut),
         text_width=text_width,
         text_height=text_height,
+        wrap_mode=resolve_wrap(ctx, wrap),
     )
 
 
 @cli.command()
 @click.argument("files", nargs=-1, required=True)
+@add_wrap_option
 @add_no_cut_option
 @click.pass_context
-def cat(ctx, files, no_cut):
+def cat(ctx, files, wrap, no_cut):
     """Print files' contents."""
-    cat_files(files, no_cut=resolve_no_cut(ctx, no_cut))
+    cat_files(
+        files,
+        no_cut=resolve_no_cut(ctx, no_cut),
+        wrap_mode=resolve_wrap(ctx, wrap),
+    )
 
 
 @cli.command()
 @click.argument("files", nargs=-1)
-def count(files):
+@add_wrap_option
+@click.pass_context
+def count(ctx, files, wrap):
     """Count printed lines."""
     if files:
         buf = ""
@@ -956,23 +1005,31 @@ def count(files):
         else:
             click.echo("No input provided for counting.", err=True)
             sys.exit(1)
-    click.echo(count_lines(buf, CHAR_WIDTH))
+    wrap_mode = resolve_wrap(ctx, wrap)
+    wrapped = wrap_text(buf, CHAR_WIDTH, wrap_mode)
+    click.echo(count_lines(wrapped, CHAR_WIDTH))
 
 
 @cli.command()
 @click.argument("commands", nargs=-1, required=True)
 @click.option("--no-wrap", is_flag=True, help="Standard capture instead of PTY wrap.")
+@add_wrap_option
 @add_no_cut_option
 @click.pass_context
-def shell(ctx, commands, no_wrap, no_cut):
+def shell(ctx, commands, no_wrap, wrap, no_cut):
     """Run shell commands and print output."""
     out = run_shell_commands(commands, wrap_tty=not no_wrap, columns=CHAR_WIDTH)
-    print_text(out, no_cut=resolve_no_cut(ctx, no_cut))
+    print_text(
+        out,
+        no_cut=resolve_no_cut(ctx, no_cut),
+        wrap_mode=resolve_wrap(ctx, wrap),
+    )
 
 
 @cli.command()
 @click.argument("files", nargs=-1)
 @add_image_options
+@add_wrap_option
 @add_no_cut_option
 @click.pass_context
 def image(ctx, files, no_cut, **kwargs):
@@ -1049,6 +1106,7 @@ def image(ctx, files, no_cut, **kwargs):
             click.echo("No usable images found.", err=True)
             sys.exit(1)
 
+    kwargs["wrap"] = resolve_wrap(ctx, kwargs.get("wrap"))
     config = create_image_config(**kwargs)
     print_with_images(
         config,
@@ -1093,6 +1151,7 @@ def arena_group():
     cls=GroupedOption,
     group=OUTPUT_GROUP,
 )
+@add_wrap_option
 @add_no_cut_option
 @click.option(
     "--video",
@@ -1184,6 +1243,7 @@ def arena_block(
     qr_size,
     qr_correction,
     no_cache,
+    wrap,
     debug,
     no_cut,
 ):
@@ -1195,6 +1255,7 @@ def arena_block(
     qr_cfg = QRConfig(
         enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M)
     )
+    wrap_mode = resolve_wrap(ctx, wrap)
     config = create_arena_image_config(
         method,
         dither,
@@ -1208,6 +1269,7 @@ def arena_block(
         contrast,
         gamma,
         autocontrast,
+        wrap_mode,
     )
 
     client = ArenaClient(cache_enabled=not no_cache)
@@ -1229,6 +1291,7 @@ def arena_block(
         config.spacing,
         footer,
         debug=config.debug,
+        wrap_mode=wrap_mode,
         no_cut=effective_no_cut,
     )
 
@@ -1395,6 +1458,7 @@ def arena_block(
     cls=GroupedOption,
     group=OUTPUT_GROUP,
 )
+@add_wrap_option
 @add_no_cut_option
 @click.option(
     "--qr",
@@ -1467,6 +1531,7 @@ def arena_channel(
     qr_correction,
     sort,
     no_cache,
+    wrap,
     debug,
     no_cut,
 ):
@@ -1487,6 +1552,7 @@ def arena_channel(
     media_opts, missing_ffmpeg = build_media_options(
         video, ffmpeg, pdf, pdf_pages, pdf_range
     )
+    wrap_mode = resolve_wrap(ctx, wrap)
     config = create_arena_image_config(
         method,
         dither,
@@ -1500,6 +1566,7 @@ def arena_channel(
         contrast,
         gamma,
         autocontrast,
+        wrap_mode,
     )
     qr_cfg = QRConfig(
         enabled=qr, size=qr_size, ec=QR_LEVELS.get(qr_correction, QR_ECLEVEL_M)
@@ -1576,6 +1643,7 @@ def arena_channel(
         config.spacing,
         None if cut_mode else footer,
         debug=config.debug,
+        wrap_mode=wrap_mode,
         auto_orient=cut_mode,
         cut_between=cut_mode,
         no_cut=effective_no_cut,
@@ -1670,6 +1738,7 @@ def arena_channel(
 @click.option("--range", help="Page range: '1,5' (pages 1-5), '5,-1' (page 5 to end)")
 @click.option("--pages", help="Specific pages: '1,2,5' (pages 1, 2, and 5)")
 @add_image_options
+@add_wrap_option
 @add_no_cut_option
 @click.pass_context
 def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
@@ -1722,6 +1791,7 @@ def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
             click.echo(f"Invalid --pages: {e}", err=True)
             sys.exit(1)
 
+    wrap_mode = resolve_wrap(ctx, kwargs.get("wrap"))
     if format == "text":
         from .pdf_utils import pdf_to_text
 
@@ -1735,7 +1805,7 @@ def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
                 os.unlink(tmp_path)
         else:
             txt = pdf_to_text(files, page_filter)
-        print_text(txt, no_cut=effective_no_cut)
+        print_text(txt, no_cut=effective_no_cut, wrap_mode=wrap_mode)
         return
 
     from .pdf_utils import pdf_to_images
@@ -1782,6 +1852,7 @@ def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
         if not user_supplied(key):
             kwargs[key] = value
 
+    kwargs["wrap"] = wrap_mode
     config = create_image_config(**kwargs)
     print_with_images(
         config,
