@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import io
 import os
+import platform
 import random
 import re
 import shlex
 import shutil
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -79,7 +81,7 @@ def _write_bold_section(formatter: click.HelpFormatter, title: str, records: Lis
     formatter.dedent()
 
 
-PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell"}
+PRINTING_COMMANDS = {"image", "pdf", "are.na", "imessage", "text", "cat", "shell"}
 
 
 class GroupedCommand(click.Command):
@@ -289,6 +291,7 @@ PDF_GROUP = "PDF handling"
 ARENA_CONTENT_GROUP = "content filters"
 QR_GROUP = "QR codes"
 NETWORK_GROUP = "cache, networking"
+IMESSAGE_GROUP = "imessage listener"
 
 
 def add_no_cut_option(func):
@@ -1725,6 +1728,207 @@ def arena_channel(
     finally:
         printer.close()
         client.close()
+
+
+@cli.group(cls=GroupedGroup)
+def imessage():
+    """Listen for incoming iMessage printer-emoji triggers (macOS only)."""
+    pass
+
+
+@imessage.command("listen")
+@click.option(
+    "--db",
+    type=click.Path(path_type=Path),
+    help="Messages chat.db path (default: ~/Library/Messages/chat.db).",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--attachments",
+    type=click.Path(path_type=Path),
+    help="Attachments root (default: ~/Library/Messages/Attachments).",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--state",
+    type=click.Path(path_type=Path),
+    help="State file path for last processed message id.",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--poll",
+    type=click.FloatRange(min=0.1),
+    default=2.0,
+    show_default=True,
+    help="Polling interval in seconds.",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--backfill",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Process the last N incoming messages on first run.",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--batch",
+    "batch_size",
+    type=click.IntRange(min=1),
+    default=50,
+    show_default=True,
+    help="Max messages to process per poll.",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Process once and exit.",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--reset-state",
+    is_flag=True,
+    help="Ignore any existing state file on startup.",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--scale",
+    default="1.0",
+    help="Comma-separated floats for per-image scale.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--align",
+    default="center",
+    help="Comma-separated: left,right,center,p-center,l-top,l-bottom,l-center.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@add_core_image_options
+@add_wrap_option
+@add_no_cut_option
+@click.pass_context
+def imessage_listen(
+    ctx,
+    db,
+    attachments,
+    state,
+    poll,
+    backfill,
+    batch_size,
+    once,
+    reset_state,
+    scale,
+    align,
+    method,
+    dither,
+    threshold,
+    diffusion,
+    brightness,
+    contrast,
+    gamma,
+    autocontrast,
+    spacing,
+    debug,
+    wrap,
+    no_cut,
+):
+    """Listen for incoming iMessage messages containing the printer emoji (U+1F5A8)."""
+    if platform.system() != "Darwin":
+        click.echo("Error: iMessage listener only runs on macOS.", err=True)
+        sys.exit(1)
+
+    get_source = getattr(ctx, "get_parameter_source", None)
+    sentinel = object()
+    option_values = {
+        "dither": dither,
+        "threshold": threshold,
+        "brightness": brightness,
+        "contrast": contrast,
+        "gamma": gamma,
+        "autocontrast": autocontrast,
+    }
+
+    def user_supplied(param_name: str) -> bool:
+        if callable(get_source):
+            try:
+                source = get_source(param_name)
+            except Exception:
+                source = None
+            if source is not None:
+                if source in (ParameterSource.DEFAULT, ParameterSource.DEFAULT_MAP):
+                    return False
+                return True
+
+        default_val = IMAGE_OPTION_FALLBACK_DEFAULTS.get(param_name, sentinel)
+        if default_val is sentinel:
+            return False
+        return option_values.get(param_name, sentinel) != default_val
+
+    if not user_supplied("dither"):
+        dither = PDF_IMAGE_TUNING_DEFAULTS["dither"]
+    if not user_supplied("threshold"):
+        threshold = PDF_IMAGE_TUNING_DEFAULTS["threshold"]
+    if not user_supplied("brightness"):
+        brightness = PDF_IMAGE_TUNING_DEFAULTS["brightness"]
+    if not user_supplied("contrast"):
+        contrast = PDF_IMAGE_TUNING_DEFAULTS["contrast"]
+    if not user_supplied("gamma"):
+        gamma = PDF_IMAGE_TUNING_DEFAULTS["gamma"]
+    if not user_supplied("autocontrast"):
+        autocontrast = bool(PDF_IMAGE_TUNING_DEFAULTS["autocontrast"])
+
+    wrap_mode = resolve_wrap(ctx, wrap)
+    config = create_image_config(
+        scale=scale,
+        align=align,
+        method=method,
+        timestamp="none",
+        dither=dither or "",
+        threshold=threshold,
+        diffusion=diffusion,
+        caption=None,
+        footer=None,
+        debug=debug,
+        spacing=spacing,
+        heading=None,
+        brightness=brightness,
+        contrast=contrast,
+        gamma=gamma,
+        autocontrast=autocontrast,
+        wrap=wrap_mode,
+    )
+
+    from .imessage import (
+        default_attachments_path,
+        default_db_path,
+        default_state_path,
+        listen,
+    )
+
+    listen(
+        db_path=db or default_db_path(),
+        attachments_path=attachments or default_attachments_path(),
+        state_path=state or default_state_path(),
+        poll_interval=poll,
+        backfill=backfill,
+        batch_size=batch_size,
+        once=once,
+        reset_state=reset_state,
+        image_config=config,
+        wrap_mode=wrap_mode,
+        no_cut=resolve_no_cut(ctx, no_cut),
+    )
 
 
 @cli.command()
