@@ -15,6 +15,7 @@ dependencies = [
     "markitdown[all]>=0.1.0",
     "click>=8.2.1",
     "requests>=2.32.3",
+    "qrcode>=8.0",
 ]
 
 [project.urls]
@@ -29,4 +30,3 @@ packages = ["receipt_print"]
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
-

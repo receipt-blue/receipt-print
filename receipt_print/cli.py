@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Sequence
 from tempfile import NamedTemporaryFile
 
 import click
@@ -41,6 +41,7 @@ from .arena import (
     block_user_name,
     canonical_block_url,
     canonical_channel_url,
+    ensure_trailing_newline,
     load_image_from_bytes,
     parse_block_identifier,
     parse_channel_identifier,
@@ -50,11 +51,21 @@ from .arena import (
     should_include_block,
     video_frame_from_bytes,
 )
+from .contact import (
+    ContactInfo,
+    build_contact_panel,
+    build_vcard,
+    normalize_contact_value,
+    parse_vcards,
+    render_landscape_card,
+)
+from .image_utils import desired_orientation
 from .printer import (
     CHAR_WIDTH,
     cat_files,
     connect_printer,
     count_lines,
+    enforce_line_limit,
     env_no_cut,
     maybe_cut,
     print_text,
@@ -81,7 +92,16 @@ def _write_bold_section(formatter: click.HelpFormatter, title: str, records: Lis
     formatter.dedent()
 
 
-PRINTING_COMMANDS = {"image", "pdf", "are.na", "imessage", "text", "cat", "shell"}
+PRINTING_COMMANDS = {
+    "image",
+    "pdf",
+    "are.na",
+    "imessage",
+    "text",
+    "cat",
+    "shell",
+    "contact",
+}
 
 
 class GroupedCommand(click.Command):
@@ -292,6 +312,7 @@ ARENA_CONTENT_GROUP = "content filters"
 QR_GROUP = "QR codes"
 NETWORK_GROUP = "cache, networking"
 IMESSAGE_GROUP = "imessage listener"
+CONTACT_GROUP = "contact card"
 
 
 def add_no_cut_option(func):
@@ -643,6 +664,54 @@ def is_http_url(value: str) -> bool:
     except Exception:
         return False
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def load_contact_images(sources: Sequence[str]) -> Tuple[List[Image.Image], List[str]]:
+    if not sources:
+        return [], []
+    exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
+    images: List[Image.Image] = []
+    names: List[str] = []
+
+    for source in sources:
+        if is_http_url(source):
+            try:
+                response = requests.get(
+                    source, timeout=MEDIA_TIMEOUT, headers={"User-Agent": USER_AGENT}
+                )
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                raise click.UsageError(f"Could not download image {source}: {exc}")
+            try:
+                images.append(load_image_from_bytes(response.content))
+            except Exception as exc:
+                raise click.UsageError(f"Invalid image data from {source}: {exc}")
+            names.append(source)
+            continue
+
+        path = os.path.expanduser(source)
+        if os.path.isdir(path):
+            for entry in sorted(os.listdir(path)):
+                if entry.lower().endswith(exts):
+                    img_path = os.path.join(path, entry)
+                    img = Image.open(img_path)
+                    img.load()
+                    images.append(img)
+                    names.append(img_path)
+            continue
+
+        if not os.path.isfile(path):
+            raise click.UsageError(f"missing file: {source}")
+        if not path.lower().endswith(exts):
+            raise click.UsageError(f"unsupported file type: {source}")
+        img = Image.open(path)
+        img.load()
+        images.append(img)
+        names.append(path)
+
+    if not images:
+        raise click.UsageError("No usable images found.")
+    return images, names
 
 
 def parse_list_option(value: Optional[str]) -> Optional[List[str]]:
@@ -1118,6 +1187,216 @@ def image(ctx, files, no_cut, **kwargs):
         heading=kwargs["heading"],
         no_cut=resolve_no_cut(ctx, no_cut),
     )
+
+
+def _printer_width_px(printer) -> int:
+    max_width = 576
+    try:
+        width = printer.profile.profile_data["media"]["width"]["pixels"]
+        if width != "Unknown":
+            max_width = int(width)
+    except Exception:
+        pass
+    return max_width
+
+
+def _print_contact_image(
+    printer, image: Image.Image, *, wrap_mode: str, align: str, spacing: int = 1
+) -> None:
+    from .image_utils import print_images_from_pil
+
+    print_images_from_pil(
+        printer,
+        [image],
+        [1.0],
+        [align],
+        ["raster"],
+        None,
+        [None],
+        [0.5],
+        [1.0],
+        captions_list=None,
+        caption_start=0,
+        footer_text=None,
+        debug=False,
+        spacing=spacing,
+        names=["contact"],
+        brightness_list=[1.0],
+        contrast_list=[1.0],
+        gamma_list=[1.0],
+        autocontrast=False,
+        wrap_mode=wrap_mode,
+        no_cut=True,
+    )
+    printer.set(align="left")
+
+
+@cli.command()
+@click.argument("vcards", nargs=-1)
+@click.option(
+    "--name",
+    help="Contact name.",
+    cls=GroupedOption,
+    group=CONTACT_GROUP,
+)
+@click.option(
+    "--email",
+    help="Contact email.",
+    cls=GroupedOption,
+    group=CONTACT_GROUP,
+)
+@click.option(
+    "--phone",
+    help="Contact phone number.",
+    cls=GroupedOption,
+    group=CONTACT_GROUP,
+)
+@click.option(
+    "--image",
+    "image_sources",
+    multiple=True,
+    help="Contact photo path or URL (repeatable).",
+    cls=GroupedOption,
+    group=CONTACT_GROUP,
+)
+@click.option(
+    "--align",
+    type=click.Choice(
+        ["left", "right", "center", "p-center", "l-top", "l-bottom", "l-center"],
+        case_sensitive=False,
+    ),
+    default="center",
+    show_default=True,
+    help="Image alignment; use l-top/l-bottom/l-center for landscape cards.",
+    cls=GroupedOption,
+    group=CONTACT_GROUP,
+)
+@click.option(
+    "--qr-size",
+    type=click.IntRange(min=1),
+    default=3,
+    show_default=True,
+    help="QR module size (printer dependent).",
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
+@add_wrap_option
+@add_no_cut_option
+@click.pass_context
+def contact(
+    ctx, vcards, name, email, phone, image_sources, align, qr_size, wrap, no_cut
+):
+    """Print a contact card from fields or vCard files."""
+    manual_values = any([name, email, phone])
+    if vcards and manual_values:
+        raise click.UsageError(
+            "vCard arguments are mutually exclusive with --name/--email/--phone."
+        )
+    if not vcards and not manual_values:
+        raise click.UsageError(
+            "Provide a vCard path or at least one of --name/--email/--phone."
+        )
+
+    contacts: List[ContactInfo] = []
+    if vcards:
+        for raw_path in vcards:
+            path = Path(raw_path).expanduser()
+            if not path.is_file():
+                raise click.UsageError(f"missing file: {raw_path}")
+            try:
+                raw = path.read_text(errors="replace")
+            except Exception as exc:
+                raise click.UsageError(f"Error reading {raw_path}: {exc}")
+            parsed = parse_vcards(raw)
+            if len(parsed) != 1:
+                raise click.UsageError(
+                    f"Expected a single vCard in {raw_path}, found {len(parsed)}."
+                )
+            contacts.append(parsed[0])
+    else:
+        contact_info = ContactInfo(
+            name=normalize_contact_value(name),
+            email=normalize_contact_value(email),
+            phone=normalize_contact_value(phone),
+        )
+        if not contact_info.has_data():
+            raise click.UsageError("Contact fields are empty after normalization.")
+        contacts.append(contact_info)
+
+    images, _ = load_contact_images(image_sources) if image_sources else ([], [])
+    if vcards:
+        if images and len(images) != len(contacts):
+            raise click.UsageError(
+                "Provide the same number of --image entries as vCard files."
+            )
+    elif len(images) > 1:
+        raise click.UsageError("Only one --image is allowed without vCards.")
+
+    wrap_mode = resolve_wrap(ctx, wrap)
+    effective_no_cut = resolve_no_cut(ctx, no_cut)
+    align = align.lower()
+
+    printer = connect_printer()
+    try:
+        for idx, contact_info in enumerate(contacts):
+            qr_payload = build_vcard(contact_info)
+            photo = images[idx] if images else None
+            landscape = desired_orientation(align) == "landscape"
+
+            if landscape and photo is not None:
+                try:
+                    card_img = render_landscape_card(
+                        contact_info,
+                        photo,
+                        qr_payload,
+                        _printer_width_px(printer),
+                        wrap_mode=wrap_mode,
+                        align=align,
+                        qr_size=qr_size,
+                    )
+                except RuntimeError as exc:
+                    raise click.ClickException(str(exc))
+                _print_contact_image(
+                    printer, card_img, wrap_mode=wrap_mode, align="left", spacing=1
+                )
+            else:
+                panel = build_contact_panel(
+                    contact_info, width=CHAR_WIDTH, wrap_mode=wrap_mode
+                )
+                enforce_line_limit(
+                    count_lines("\n".join(panel.lines), panel.width)
+                )
+                printer.set(align="left", font="a", bold=False, normal_textsize=True)
+                for line_idx, line in enumerate(panel.lines):
+                    printer.set(bold=line_idx in panel.bold_line_indices)
+                    printer.text(ensure_trailing_newline(line))
+                printer.set(align="left", font="a", bold=False, normal_textsize=True)
+
+                if photo is not None:
+                    printer.text("\n")
+                    _print_contact_image(
+                        printer,
+                        photo,
+                        wrap_mode=wrap_mode,
+                        align="center",
+                        spacing=1,
+                    )
+
+                printer.set(align="right", font="a", bold=False)
+                try:
+                    printer.qr(qr_payload, size=qr_size, ec=QR_ECLEVEL_M)
+                except Exception as exc:
+                    sys.stderr.write(
+                        f"Warning: Failed to print QR for contact: {exc}\n"
+                    )
+                printer.set(align="left")
+
+            if idx < len(contacts) - 1:
+                printer.text("\n")
+
+        maybe_cut(printer, no_cut=effective_no_cut)
+    finally:
+        printer.close()
 
 
 @cli.group(name="are.na", cls=GroupedGroup)

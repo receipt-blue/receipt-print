@@ -49,6 +49,14 @@ pbpaste | receipt-print pdf  # or paste from `wl-paste` / `xclip -selection clip
 receipt-print pdf --format text document.pdf
 ```
 
+Print contact cards:
+```bash
+receipt-print contact --name "Jane Doe" --email "jane@example.com" --phone "+1 555 123 4567"
+receipt-print contact --image headshot.jpg --name "Jane Doe" --email "jane@example.com"
+receipt-print contact person.vcf
+receipt-print contact person-a.vcf person-b.vcf --image a.jpg --image b.jpg
+```
+
 Run command(s) and print captured output:
 ```bash
 receipt-print shell "ls -l" "git status"
