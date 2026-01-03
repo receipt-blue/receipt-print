@@ -53,13 +53,11 @@ from .arena import (
 )
 from .contact import (
     ContactInfo,
-    build_contact_panel,
-    build_vcard,
     normalize_contact_value,
     parse_vcards,
-    render_landscape_card,
+    print_contact_card,
 )
-from .image_utils import desired_orientation
+from .image_utils import parse_caption_csv
 from .printer import (
     CHAR_WIDTH,
     cat_files,
@@ -1189,48 +1187,6 @@ def image(ctx, files, no_cut, **kwargs):
     )
 
 
-def _printer_width_px(printer) -> int:
-    max_width = 576
-    try:
-        width = printer.profile.profile_data["media"]["width"]["pixels"]
-        if width != "Unknown":
-            max_width = int(width)
-    except Exception:
-        pass
-    return max_width
-
-
-def _print_contact_image(
-    printer, image: Image.Image, *, wrap_mode: str, align: str, spacing: int = 1
-) -> None:
-    from .image_utils import print_images_from_pil
-
-    print_images_from_pil(
-        printer,
-        [image],
-        [1.0],
-        [align],
-        ["raster"],
-        None,
-        [None],
-        [0.5],
-        [1.0],
-        captions_list=None,
-        caption_start=0,
-        footer_text=None,
-        debug=False,
-        spacing=spacing,
-        names=["contact"],
-        brightness_list=[1.0],
-        contrast_list=[1.0],
-        gamma_list=[1.0],
-        autocontrast=False,
-        wrap_mode=wrap_mode,
-        no_cut=True,
-    )
-    printer.set(align="left")
-
-
 @cli.command()
 @click.argument("vcards", nargs=-1)
 @click.option(
@@ -1260,6 +1216,12 @@ def _print_contact_image(
     group=CONTACT_GROUP,
 )
 @click.option(
+    "--caption",
+    help="Comma-separated list of per-contact captions.",
+    cls=GroupedOption,
+    group=CONTACT_GROUP,
+)
+@click.option(
     "--align",
     type=click.Choice(
         ["left", "right", "center", "p-center", "l-top", "l-bottom", "l-center"],
@@ -1284,7 +1246,17 @@ def _print_contact_image(
 @add_no_cut_option
 @click.pass_context
 def contact(
-    ctx, vcards, name, email, phone, image_sources, align, qr_size, wrap, no_cut
+    ctx,
+    vcards,
+    name,
+    email,
+    phone,
+    image_sources,
+    caption,
+    align,
+    qr_size,
+    wrap,
+    no_cut,
 ):
     """Print a contact card from fields or vCard files."""
     manual_values = any([name, email, phone])
@@ -1325,9 +1297,10 @@ def contact(
 
     images, _ = load_contact_images(image_sources) if image_sources else ([], [])
     if vcards:
-        if images and len(images) != len(contacts):
+        contacts_missing_photo = [c for c in contacts if c.photo is None]
+        if images and len(images) != len(contacts_missing_photo):
             raise click.UsageError(
-                "Provide the same number of --image entries as vCard files."
+                "Provide one --image per vCard without an embedded photo."
             )
     elif len(images) > 1:
         raise click.UsageError("Only one --image is allowed without vCards.")
@@ -1335,61 +1308,31 @@ def contact(
     wrap_mode = resolve_wrap(ctx, wrap)
     effective_no_cut = resolve_no_cut(ctx, no_cut)
     align = align.lower()
+    captions = parse_caption_csv(caption) if caption else []
 
     printer = connect_printer()
     try:
+        image_idx = 0
         for idx, contact_info in enumerate(contacts):
-            qr_payload = build_vcard(contact_info)
-            photo = images[idx] if images else None
-            landscape = desired_orientation(align) == "landscape"
-
-            if landscape and photo is not None:
-                try:
-                    card_img = render_landscape_card(
-                        contact_info,
-                        photo,
-                        qr_payload,
-                        _printer_width_px(printer),
-                        wrap_mode=wrap_mode,
-                        align=align,
-                        qr_size=qr_size,
-                    )
-                except RuntimeError as exc:
-                    raise click.ClickException(str(exc))
-                _print_contact_image(
-                    printer, card_img, wrap_mode=wrap_mode, align="left", spacing=1
+            photo = contact_info.photo
+            if photo is None and image_idx < len(images):
+                photo = images[image_idx]
+                image_idx += 1
+            caption_text = None
+            if captions:
+                caption_text = captions[idx] if idx < len(captions) else captions[-1]
+            try:
+                print_contact_card(
+                    printer,
+                    contact_info,
+                    photo=photo,
+                    wrap_mode=wrap_mode,
+                    align=align,
+                    qr_size=qr_size,
+                    caption=caption_text,
                 )
-            else:
-                panel = build_contact_panel(
-                    contact_info, width=CHAR_WIDTH, wrap_mode=wrap_mode
-                )
-                enforce_line_limit(
-                    count_lines("\n".join(panel.lines), panel.width)
-                )
-                printer.set(align="left", font="a", bold=False, normal_textsize=True)
-                for line_idx, line in enumerate(panel.lines):
-                    printer.set(bold=line_idx in panel.bold_line_indices)
-                    printer.text(ensure_trailing_newline(line))
-                printer.set(align="left", font="a", bold=False, normal_textsize=True)
-
-                if photo is not None:
-                    printer.text("\n")
-                    _print_contact_image(
-                        printer,
-                        photo,
-                        wrap_mode=wrap_mode,
-                        align="center",
-                        spacing=1,
-                    )
-
-                printer.set(align="right", font="a", bold=False)
-                try:
-                    printer.qr(qr_payload, size=qr_size, ec=QR_ECLEVEL_M)
-                except Exception as exc:
-                    sys.stderr.write(
-                        f"Warning: Failed to print QR for contact: {exc}\n"
-                    )
-                printer.set(align="left")
+            except RuntimeError as exc:
+                raise click.ClickException(str(exc))
 
             if idx < len(contacts) - 1:
                 printer.text("\n")

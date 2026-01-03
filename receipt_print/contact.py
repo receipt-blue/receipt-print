@@ -1,13 +1,26 @@
+import base64
+import binascii
+import io
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Sequence, Set, Tuple
+from urllib.parse import unquote, urlparse
 
 from PIL import Image, ImageDraw, ImageFont
 
 from .image_utils import desired_orientation
-from .printer import CHAR_WIDTH, sanitize_output, wrap_text
+from .printer import (
+    CHAR_WIDTH,
+    count_lines,
+    enforce_line_limit,
+    sanitize_output,
+    wrap_text,
+)
 
 WS_CLEANER = re.compile(r"\s+")
+BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
 
 
 @dataclass
@@ -15,6 +28,7 @@ class ContactInfo:
     name: str = ""
     email: str = ""
     phone: str = ""
+    photo: Optional[Image.Image] = None
 
     def has_data(self) -> bool:
         return bool(self.name or self.email or self.phone)
@@ -28,6 +42,14 @@ class ContactPanel:
 
 
 def normalize_contact_value(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    cleaned = sanitize_output(value)
+    cleaned = cleaned.encode("ascii", "ignore").decode("ascii")
+    return WS_CLEANER.sub(" ", cleaned).strip()
+
+
+def _normalize_caption(value: Optional[str]) -> str:
     if not value:
         return ""
     cleaned = sanitize_output(value)
@@ -59,6 +81,7 @@ def _parse_vcard_lines(lines: Sequence[str]) -> ContactInfo:
     email = ""
     phone = ""
     n_value = ""
+    photo: Optional[Image.Image] = None
 
     for line in lines:
         if ":" not in line:
@@ -73,6 +96,8 @@ def _parse_vcard_lines(lines: Sequence[str]) -> ContactInfo:
             email = value
         elif prop_name == "TEL" and not phone:
             phone = value
+        elif prop_name == "PHOTO" and photo is None:
+            photo = _parse_vcard_photo(prop, value)
 
     if not name and n_value:
         name = _name_from_n(n_value)
@@ -81,6 +106,7 @@ def _parse_vcard_lines(lines: Sequence[str]) -> ContactInfo:
         name=normalize_contact_value(name),
         email=normalize_contact_value(email),
         phone=normalize_contact_value(phone),
+        photo=photo,
     )
     return contact
 
@@ -121,6 +147,88 @@ def build_vcard(contact: ContactInfo) -> str:
         lines.append(f"TEL:{contact.phone}")
     lines.append("END:VCARD")
     return "\n".join(lines)
+
+
+def _parse_vcard_photo(prop: str, value: str) -> Optional[Image.Image]:
+    if not value:
+        return None
+    params = [item.strip() for item in prop.split(";")[1:] if item.strip()]
+    param_map = {}
+    for param in params:
+        if "=" in param:
+            key, val = param.split("=", 1)
+            param_map[key.strip().upper()] = val.strip()
+        else:
+            param_map[param.upper()] = ""
+
+    raw_value = value.strip()
+    if not raw_value:
+        return None
+
+    if raw_value.lower().startswith("data:"):
+        return _image_from_data_uri(raw_value)
+
+    value_type = param_map.get("VALUE", "").upper()
+    if value_type in {"URI", "URL"}:
+        return _image_from_uri(raw_value)
+
+    encoding = param_map.get("ENCODING", "").upper()
+    if encoding in {"B", "BASE64"} or _looks_like_base64(raw_value):
+        return _image_from_base64(raw_value)
+
+    return None
+
+
+def _looks_like_base64(value: str) -> bool:
+    if len(value) < 32:
+        return False
+    return bool(BASE64_RE.match(value))
+
+
+def _image_from_base64(value: str) -> Optional[Image.Image]:
+    cleaned = re.sub(r"\s+", "", value)
+    try:
+        data = base64.b64decode(cleaned, validate=False)
+    except (binascii.Error, ValueError):
+        return None
+    return _image_from_bytes(data)
+
+
+def _image_from_data_uri(value: str) -> Optional[Image.Image]:
+    header, _, data = value.partition(",")
+    if not data:
+        return None
+    if ";base64" not in header.lower():
+        return None
+    return _image_from_base64(data)
+
+
+def _image_from_uri(value: str) -> Optional[Image.Image]:
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.scheme != "file":
+        return None
+    path = parsed.path if parsed.scheme == "file" else value
+    try:
+        photo_path = Path(unquote(path)).expanduser()
+    except Exception:
+        return None
+    if not photo_path.is_file():
+        return None
+    try:
+        img = Image.open(photo_path)
+        img.load()
+        return img
+    except Exception:
+        return None
+
+
+def _image_from_bytes(data: bytes) -> Optional[Image.Image]:
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        return img
+    except Exception:
+        return None
 
 
 def _wrap_lines(value: str, width: int, wrap_mode: str) -> List[str]:
@@ -288,3 +396,136 @@ def render_landscape_card(
     qr_y = max(0, total_height - qr_img.height)
     card.paste(qr_img, (qr_x, qr_y))
     return card
+
+
+def print_contact_image(
+    printer,
+    image: Image.Image,
+    *,
+    wrap_mode: str,
+    align: str,
+    spacing: int = 1,
+    caption: Optional[str] = None,
+) -> None:
+    from .image_utils import print_images_from_pil
+
+    captions_list = [caption] if caption else None
+    print_images_from_pil(
+        printer,
+        [image],
+        [1.0],
+        [align],
+        ["raster"],
+        None,
+        [None],
+        [0.5],
+        [1.0],
+        captions_list=captions_list,
+        caption_start=0,
+        footer_text=None,
+        debug=False,
+        spacing=spacing,
+        names=["contact"],
+        brightness_list=[1.0],
+        contrast_list=[1.0],
+        gamma_list=[1.0],
+        autocontrast=False,
+        wrap_mode=wrap_mode,
+        no_cut=True,
+    )
+    printer.set(align="left")
+
+
+def _print_caption_text(printer, caption: str, wrap_mode: str) -> None:
+    cleaned = _normalize_caption(caption)
+    if not cleaned:
+        return
+    printer.text("\n")
+    printer.set(align="center", font="b", bold=True)
+    wrapped = wrap_text(cleaned, CHAR_WIDTH, wrap_mode)
+    if not wrapped.endswith("\n"):
+        wrapped += "\n"
+    printer.text(wrapped)
+    printer.set(align="left")
+
+
+def _ensure_trailing_newline(text: str) -> str:
+    return text if text.endswith("\n") else text + "\n"
+
+
+def print_contact_card(
+    printer,
+    contact: ContactInfo,
+    *,
+    photo: Optional[Image.Image],
+    wrap_mode: str,
+    align: str,
+    qr_size: int,
+    caption: Optional[str] = None,
+    spacing: int = 1,
+) -> None:
+    from escpos.escpos import QR_ECLEVEL_M
+
+    align = (align or "center").lower()
+    photo_to_use = contact.photo or photo
+    qr_payload = build_vcard(contact)
+    landscape = desired_orientation(align) == "landscape"
+
+    if landscape and photo_to_use is not None:
+        card_img = render_landscape_card(
+            contact,
+            photo_to_use,
+            qr_payload,
+            printer_width_px=_printer_width_px(printer),
+            wrap_mode=wrap_mode,
+            align=align,
+            qr_size=qr_size,
+        )
+        print_contact_image(
+            printer,
+            card_img,
+            wrap_mode=wrap_mode,
+            align="left",
+            spacing=spacing,
+            caption=_normalize_caption(caption),
+        )
+        return
+
+    panel = build_contact_panel(contact, width=CHAR_WIDTH, wrap_mode=wrap_mode)
+    enforce_line_limit(count_lines("\n".join(panel.lines), panel.width))
+    printer.set(align="left", font="a", bold=False, normal_textsize=True)
+    for line_idx, line in enumerate(panel.lines):
+        printer.set(bold=line_idx in panel.bold_line_indices)
+        printer.text(_ensure_trailing_newline(line))
+    printer.set(align="left", font="a", bold=False, normal_textsize=True)
+
+    if photo_to_use is not None:
+        printer.text("\n")
+        print_contact_image(
+            printer,
+            photo_to_use,
+            wrap_mode=wrap_mode,
+            align="center",
+            spacing=spacing,
+        )
+
+    printer.set(align="right", font="a", bold=False)
+    try:
+        printer.qr(qr_payload, size=qr_size, ec=QR_ECLEVEL_M)
+    except Exception as exc:
+        sys.stderr.write(f"Warning: Failed to print QR for contact: {exc}\n")
+    printer.set(align="left")
+
+    if caption:
+        _print_caption_text(printer, caption, wrap_mode)
+
+
+def _printer_width_px(printer) -> int:
+    max_width = 576
+    try:
+        width = printer.profile.profile_data["media"]["width"]["pixels"]
+        if width != "Unknown":
+            max_width = int(width)
+    except Exception:
+        pass
+    return max_width

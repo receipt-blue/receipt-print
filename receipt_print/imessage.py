@@ -15,6 +15,7 @@ from urllib.parse import quote
 from PIL import Image
 
 from .arena import ArenaPrintJob, format_timestamp
+from .contact import ContactInfo, parse_vcards, print_contact_card
 from .image_utils import print_images_from_pil
 from .pdf_utils import pdf_to_images
 from .printer import connect_printer, maybe_cut, sanitize_output
@@ -47,6 +48,18 @@ class AttachmentRow:
     filename: Optional[str]
     mime_type: Optional[str]
     transfer_name: Optional[str]
+
+
+@dataclass
+class MessageMedia:
+    attachment_images: List[Image.Image]
+    attachment_names: List[str]
+    pdf_images: List[Image.Image]
+    pdf_names: List[str]
+    contacts: List[ContactInfo]
+    missing: List[str]
+    unsupported: List[str]
+    invalid: List[str]
 
 
 def default_db_path() -> Path:
@@ -319,6 +332,19 @@ def is_pdf_attachment(path: Path, mime_type: Optional[str]) -> bool:
     return path.suffix.lower() == ".pdf"
 
 
+def is_vcard_attachment(path: Path, mime_type: Optional[str]) -> bool:
+    mime = (mime_type or "").lower().split(";", 1)[0].strip()
+    if mime in {
+        "text/vcard",
+        "text/x-vcard",
+        "text/directory",
+        "application/vcard",
+        "application/x-vcard",
+    }:
+        return True
+    return path.suffix.lower() in {".vcf", ".vcard"}
+
+
 def resolve_attachment_path(
     filename: Optional[str], attachments_root: Path
 ) -> Optional[Path]:
@@ -332,11 +358,15 @@ def resolve_attachment_path(
 
 def load_message_media(
     attachments: Sequence[AttachmentRow], attachments_root: Path
-) -> Tuple[List[Image.Image], List[str], List[str], List[str]]:
-    images: List[Image.Image] = []
-    names: List[str] = []
+) -> MessageMedia:
+    attachment_images: List[Image.Image] = []
+    attachment_names: List[str] = []
+    pdf_images: List[Image.Image] = []
+    pdf_names: List[str] = []
+    contacts: List[ContactInfo] = []
     missing: List[str] = []
     unsupported: List[str] = []
+    invalid: List[str] = []
 
     for att in attachments:
         path = resolve_attachment_path(att.filename, attachments_root)
@@ -347,30 +377,53 @@ def load_message_media(
             missing.append(str(path))
             continue
         if is_pdf_attachment(path, att.mime_type):
-            pdf_images, pdf_names = pdf_to_images([str(path)])
-            if not pdf_images:
+            pdf_pages, page_names = pdf_to_images([str(path)])
+            if not pdf_pages:
                 unsupported.append(str(path))
                 continue
-            images.extend(pdf_images)
-            names.extend(pdf_names)
+            pdf_images.extend(pdf_pages)
+            pdf_names.extend(page_names)
             continue
         if is_image_attachment(path, att.mime_type):
             try:
                 img = Image.open(path)
                 img.load()
-                images.append(img)
-                names.append(str(path))
+                attachment_images.append(img)
+                attachment_names.append(str(path))
             except Exception:
                 unsupported.append(str(path))
             continue
+        if is_vcard_attachment(path, att.mime_type):
+            try:
+                raw = path.read_text(errors="replace")
+            except Exception as exc:
+                invalid.append(f"{path} ({exc})")
+                continue
+            parsed = parse_vcards(raw)
+            if not parsed:
+                invalid.append(f"{path} (no contacts)")
+                continue
+            contacts.extend(parsed)
+            continue
         unsupported.append(str(path))
 
-    return images, names, missing, unsupported
+    return MessageMedia(
+        attachment_images=attachment_images,
+        attachment_names=attachment_names,
+        pdf_images=pdf_images,
+        pdf_names=pdf_names,
+        contacts=contacts,
+        missing=missing,
+        unsupported=unsupported,
+        invalid=invalid,
+    )
 
 
 def print_message(
     sender: str,
     body_text: str,
+    contacts: Sequence[ContactInfo],
+    contact_photos: Sequence[Optional[Image.Image]],
     images: Sequence[Image.Image],
     image_names: Sequence[str],
     timestamp: Optional[str],
@@ -401,10 +454,39 @@ def print_message(
             no_cut=no_cut,
         )
 
+        printed_media = False
+        caption_text = sanitize_caption(body_text) if body_text else ""
+
+        if contacts:
+            contact_align = (
+                image_config.aligns[0]
+                if image_config.aligns
+                else "center"
+            )
+            for idx, contact in enumerate(contacts):
+                photo = (
+                    contact_photos[idx]
+                    if idx < len(contact_photos)
+                    else None
+                )
+                print_contact_card(
+                    printer,
+                    contact,
+                    photo=photo,
+                    wrap_mode=wrap_mode,
+                    align=contact_align,
+                    qr_size=3,
+                    caption=caption_text or None,
+                    spacing=image_config.spacing,
+                )
+                printed_media = True
+                if idx < len(contacts) - 1:
+                    job.line_break(1)
+
         if images:
             captions: List[str] = []
-            if body_text:
-                captions = [sanitize_caption(body_text)]
+            if caption_text and not contacts:
+                captions = [caption_text]
             print_images_from_pil(
                 printer,
                 images,
@@ -428,7 +510,9 @@ def print_message(
                 wrap_mode=wrap_mode,
                 no_cut=no_cut,
             )
-        elif body_text:
+            printed_media = True
+
+        if not printed_media and body_text:
             job.print_text(body_text, align="left", font="a")
 
         if sender or timestamp:
@@ -496,22 +580,50 @@ def listen(
                         continue
                     body_text = strip_printer_emoji(raw_text)
                     attachments = fetch_attachments(conn, message.rowid)
-                    images, names, missing, unsupported = load_message_media(
-                        attachments, attachments_path
-                    )
+                    media = load_message_media(attachments, attachments_path)
 
-                    if missing:
-                        for path in missing:
+                    if media.missing:
+                        for path in media.missing:
                             sys.stderr.write(
                                 f"Warning: Missing attachment for message {message.rowid}: {path}\n"
                             )
-                    if unsupported:
-                        for path in unsupported:
+                    if media.unsupported:
+                        for path in media.unsupported:
                             sys.stderr.write(
                                 f"Warning: Unsupported attachment for message {message.rowid}: {path}\n"
                             )
+                    if media.invalid:
+                        for info in media.invalid:
+                            sys.stderr.write(
+                                "Warning: Invalid vCard attachment for message "
+                                f"{message.rowid}: {info}\n"
+                            )
 
-                    if not images and not body_text:
+                    contacts = media.contacts
+                    contact_photos: List[Optional[Image.Image]] = []
+                    if contacts:
+                        image_idx = 0
+                        for contact in contacts:
+                            photo = contact.photo
+                            if photo is None and image_idx < len(
+                                media.attachment_images
+                            ):
+                                photo = media.attachment_images[image_idx]
+                                image_idx += 1
+                            contact_photos.append(photo)
+                        images = (
+                            media.pdf_images
+                            + media.attachment_images[image_idx:]
+                        )
+                        names = (
+                            media.pdf_names
+                            + media.attachment_names[image_idx:]
+                        )
+                    else:
+                        images = media.pdf_images + media.attachment_images
+                        names = media.pdf_names + media.attachment_names
+
+                    if not images and not contacts and not body_text:
                         sys.stderr.write(
                             f"Warning: No printable content for message {message.rowid}.\n"
                         )
@@ -524,6 +636,8 @@ def listen(
                         print_message(
                             sender,
                             body_text,
+                            contacts,
+                            contact_photos,
                             images,
                             names,
                             timestamp,
