@@ -401,13 +401,6 @@ def print_message(
             no_cut=no_cut,
         )
 
-        job.print_heading("Message", trailing_blank=False)
-        if sender:
-            job.print_text(sender, align="left", font="b", bold=True)
-
-        if images or body_text:
-            job.line_break(1)
-
         if images:
             captions: List[str] = []
             if body_text:
@@ -438,9 +431,12 @@ def print_message(
         elif body_text:
             job.print_text(body_text, align="left", font="a")
 
-        if timestamp:
+        if sender or timestamp:
             job.line_break(1)
-            job.print_text(timestamp, align="right", font="a")
+            if sender:
+                job.print_text(f"- {sender}", align="right", font="a")
+            if timestamp:
+                job.print_text(timestamp, align="right", font="a")
 
         maybe_cut(printer, no_cut=no_cut)
     finally:
