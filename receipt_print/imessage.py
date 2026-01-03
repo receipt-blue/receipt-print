@@ -62,6 +62,14 @@ class MessageMedia:
     invalid: List[str]
 
 
+@dataclass
+class IncomingSummary:
+    rowid: int
+    text: Optional[str]
+    attributed_body: Optional[bytes]
+    date: Optional[int]
+
+
 def default_db_path() -> Path:
     override = os.getenv("IMESSAGE_DB_PATH") or os.getenv("RP_IMESSAGE_DB_PATH")
     if override:
@@ -130,6 +138,48 @@ def fetch_latest_incoming_rowid(conn: sqlite3.Connection) -> int:
     if not row:
         return 0
     return int(row["rowid"])
+
+
+def fetch_latest_incoming_message(
+    conn: sqlite3.Connection,
+) -> Optional[IncomingSummary]:
+    row = conn.execute(
+        "SELECT m.ROWID AS rowid, m.text AS text, "
+        "m.attributedBody AS attributed_body, m.date AS date "
+        "FROM message m "
+        "WHERE m.is_from_me = 0 ORDER BY m.ROWID DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return None
+    return IncomingSummary(
+        rowid=int(row["rowid"]),
+        text=row["text"],
+        attributed_body=row["attributed_body"],
+        date=row["date"],
+    )
+
+
+def fetch_recent_incoming_messages(
+    conn: sqlite3.Connection, limit: int
+) -> List[IncomingSummary]:
+    rows = conn.execute(
+        "SELECT m.ROWID AS rowid, m.text AS text, "
+        "m.attributedBody AS attributed_body, m.date AS date "
+        "FROM message m "
+        "WHERE m.is_from_me = 0 ORDER BY m.ROWID DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    summaries: List[IncomingSummary] = []
+    for row in rows:
+        summaries.append(
+            IncomingSummary(
+                rowid=int(row["rowid"]),
+                text=row["text"],
+                attributed_body=row["attributed_body"],
+                date=row["date"],
+            )
+        )
+    return summaries
 
 
 def bootstrap_last_rowid(conn: sqlite3.Connection, backfill: int) -> int:
@@ -215,11 +265,11 @@ def extract_text_from_attributed_body(blob: Optional[bytes]) -> Optional[str]:
         if idx != -1:
             payload = data[idx:]
     if not payload:
-        return None
+        return extract_text_fallback(data)
     try:
         plist = plistlib.loads(payload)
     except Exception:
-        return None
+        return extract_text_fallback(data)
     objects = plist.get("$objects")
     top = plist.get("$top")
     if isinstance(objects, list) and isinstance(top, dict):
@@ -234,7 +284,73 @@ def extract_text_from_attributed_body(blob: Optional[bytes]) -> Optional[str]:
         for obj in objects:
             if isinstance(obj, str) and obj and not obj.startswith("NS"):
                 return obj
-    return None
+    return extract_text_fallback(data)
+
+
+def extract_text_fallback(data: bytes) -> Optional[str]:
+    candidates: List[str] = []
+    try:
+        candidates.append(data.decode("utf-8", errors="ignore"))
+    except Exception:
+        pass
+
+    null_ratio = data.count(b"\x00") / max(len(data), 1)
+    if null_ratio > 0.2:
+        for encoding in ("utf-16le", "utf-16be"):
+            try:
+                candidates.append(data.decode(encoding, errors="ignore"))
+            except Exception:
+                continue
+
+    key_prefixes = (
+        "__kIM",
+        "NS",
+        "NSMutable",
+        "NSConcrete",
+        "NSObject",
+        "NSString",
+        "NSAttributedString",
+        "NSDictionary",
+        "NSNumber",
+    )
+
+    best = None
+    best_score = 0
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = candidate.replace("\x00", "")
+        chunks: List[str] = []
+        buf: List[str] = []
+        for ch in candidate:
+            if ch.isprintable():
+                buf.append(ch)
+            else:
+                if buf:
+                    chunks.append("".join(buf))
+                    buf = []
+        if buf:
+            chunks.append("".join(buf))
+
+        for chunk in chunks:
+            cleaned = re.sub(r"\s{2,}", " ", chunk).strip()
+            if len(cleaned) < 2:
+                continue
+            letters = sum(c.isalnum() for c in cleaned)
+            score = len(cleaned) + letters
+            if PRINTER_EMOJI_RE.search(cleaned):
+                score += 1000
+            if any(ord(c) >= 0x1F300 for c in cleaned):
+                score += 100
+            if cleaned.startswith(key_prefixes):
+                score -= 200
+            if cleaned.startswith("__") or cleaned.count("_") >= max(2, len(cleaned) // 4):
+                score -= 100
+            if score > best_score:
+                best_score = score
+                best = cleaned
+
+    return best if best_score > 0 else None
 
 
 def _resolve_uid(obj, objects):
