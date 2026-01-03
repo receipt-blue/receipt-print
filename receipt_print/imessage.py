@@ -653,6 +653,7 @@ def listen(
     batch_size: int,
     once: bool,
     reset_state: bool,
+    verbose: bool,
     image_config,
     wrap_mode: str,
     no_cut: bool,
@@ -668,6 +669,18 @@ def listen(
         state = ListenerState()
     else:
         state = load_state(state_path)
+
+    def preview(text: str, max_len: int = 80) -> str:
+        if not text:
+            return "<empty>"
+        cleaned = text.replace("\n", "\\n")
+        if len(cleaned) > max_len:
+            return f"{cleaned[: max_len - 3]}..."
+        return cleaned
+
+    def log_line(message: str) -> None:
+        sys.stdout.write(message + "\n")
+        sys.stdout.flush()
 
     while True:
         try:
@@ -692,6 +705,21 @@ def listen(
                     raw_text = resolve_message_text(
                         message.text, message.attributed_body
                     )
+                    if verbose:
+                        sender = resolve_sender(message)
+                        msg_dt = apple_time_to_datetime(message.date)
+                        timestamp = format_timestamp(msg_dt) or "unknown"
+                        log_line(
+                            " ".join(
+                                [
+                                    f"rowid={message.rowid}",
+                                    f"time={timestamp}",
+                                    f"from={sender}",
+                                    f"emoji={'yes' if contains_printer_emoji(raw_text) else 'no'}",
+                                    f"text={preview(raw_text)}",
+                                ]
+                            )
+                        )
                     if not contains_printer_emoji(raw_text):
                         continue
                     body_text = strip_printer_emoji(raw_text)
@@ -748,6 +776,18 @@ def listen(
                     sender = resolve_sender(message)
                     msg_dt = apple_time_to_datetime(message.date)
                     timestamp = format_timestamp(msg_dt)
+                    log_line(
+                        " ".join(
+                            [
+                                "print",
+                                f"rowid={message.rowid}",
+                                f"time={timestamp or 'unknown'}",
+                                f"from={sender}",
+                                f"text={preview(body_text)}",
+                                f"images={len(images)}",
+                            ]
+                        )
+                    )
                     try:
                         print_message(
                             sender,

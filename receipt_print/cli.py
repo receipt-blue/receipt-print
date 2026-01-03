@@ -6,6 +6,7 @@ import random
 import re
 import shlex
 import shutil
+import sqlite3
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -1999,6 +2000,13 @@ def imessage():
     group=IMESSAGE_GROUP,
 )
 @click.option(
+    "--verbose",
+    is_flag=True,
+    help="Log all incoming messages (including skipped).",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
     "--batch",
     "batch_size",
     type=click.IntRange(min=1),
@@ -2050,6 +2058,7 @@ def imessage_listen(
     batch_size,
     once,
     reset_state,
+    verbose,
     scale,
     align,
     method,
@@ -2147,10 +2156,128 @@ def imessage_listen(
         batch_size=batch_size,
         once=once,
         reset_state=reset_state,
+        verbose=verbose,
         image_config=config,
         wrap_mode=wrap_mode,
         no_cut=resolve_no_cut(ctx, no_cut),
     )
+
+
+@imessage.command("test")
+@click.option(
+    "--db",
+    type=click.Path(path_type=Path),
+    help="Messages chat.db path (default: ~/Library/Messages/chat.db).",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+@click.option(
+    "--tail",
+    type=click.IntRange(min=1, max=200),
+    default=5,
+    show_default=True,
+    help="Inspect the last N incoming messages.",
+    cls=GroupedOption,
+    group=IMESSAGE_GROUP,
+)
+def imessage_test(db, tail):
+    """Check whether the Messages database is readable."""
+    if platform.system() != "Darwin":
+        click.echo("Error: iMessage listener only runs on macOS.", err=True)
+        sys.exit(1)
+
+    from .imessage import (
+        apple_time_to_datetime,
+        contains_printer_emoji,
+        default_db_path,
+        extract_text_from_attributed_body,
+        fetch_recent_incoming_messages,
+        open_chat_db,
+    )
+
+    db_path = db or default_db_path()
+    click.echo(f"DB path: {db_path}")
+
+    wal_path = db_path.parent / f"{db_path.name}-wal"
+    shm_path = db_path.parent / f"{db_path.name}-shm"
+
+    def access_label(path: Path) -> str:
+        if not path.exists():
+            return "missing"
+        return "readable" if os.access(path, os.R_OK) else "not readable"
+
+    click.echo(f"WAL file: {wal_path} ({access_label(wal_path)})")
+    click.echo(f"SHM file: {shm_path} ({access_label(shm_path)})")
+
+    try:
+        conn = open_chat_db(db_path)
+    except sqlite3.OperationalError as exc:
+        click.echo(
+            f"Error opening Messages database at {db_path}: {exc}",
+            err=True,
+        )
+        click.echo(
+            "Make sure your terminal has Full Disk Access in System Settings.",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        summaries = fetch_recent_incoming_messages(conn, tail)
+    finally:
+        conn.close()
+
+    if not summaries:
+        click.echo("Latest incoming message: none found.")
+        return
+
+    def preview(text: str) -> str:
+        if not text:
+            return "<empty>"
+        cleaned = text.replace("\n", "\\n")
+        if len(cleaned) > 120:
+            return f"{cleaned[:117]}..."
+        return cleaned
+
+    click.echo(f"Latest incoming messages (most recent last, count={len(summaries)}):")
+    for summary in reversed(summaries):
+        decoded = extract_text_from_attributed_body(summary.attributed_body) or ""
+        text_val = summary.text or ""
+        if contains_printer_emoji(text_val):
+            resolved = text_val
+        elif decoded and contains_printer_emoji(decoded):
+            resolved = decoded
+        else:
+            resolved = text_val or decoded
+
+        has_text = bool(resolved)
+        has_emoji = contains_printer_emoji(resolved)
+        msg_dt = apple_time_to_datetime(summary.date)
+        ts = format_timestamp(msg_dt) or "unknown"
+
+        blob_len = 0
+        blob_has_bplist = False
+        blob_has_emoji_bytes = False
+        if summary.attributed_body:
+            data = bytes(summary.attributed_body)
+            blob_len = len(data)
+            blob_has_bplist = b"bplist" in data
+            blob_has_emoji_bytes = b"\xF0\x9F\x96\xA8" in data
+
+        click.echo(
+            " ".join(
+                [
+                    f"- rowid={summary.rowid}",
+                    f"time={ts}",
+                    f"text={'yes' if has_text else 'no'}",
+                    f"emoji={'yes' if has_emoji else 'no'}",
+                    f"blob={blob_len}",
+                    f"bplist={'yes' if blob_has_bplist else 'no'}",
+                    f"emoji_bytes={'yes' if blob_has_emoji_bytes else 'no'}",
+                    f"preview={preview(resolved)}",
+                ]
+            )
+        )
 
 
 @cli.command()
