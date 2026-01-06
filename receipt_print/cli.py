@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import io
 import os
 import platform
 import random
@@ -43,7 +42,6 @@ from .arena import (
     canonical_block_url,
     canonical_channel_url,
     ensure_trailing_newline,
-    load_image_from_bytes,
     parse_block_identifier,
     parse_channel_identifier,
     parse_timestamp,
@@ -58,6 +56,7 @@ from .contact import (
     parse_vcards,
     print_contact_card,
 )
+from .image_loader import load_image_from_bytes, load_image_from_path
 from .image_utils import parse_caption_csv
 from .printer import (
     CHAR_WIDTH,
@@ -668,7 +667,7 @@ def is_http_url(value: str) -> bool:
 def load_contact_images(sources: Sequence[str]) -> Tuple[List[Image.Image], List[str]]:
     if not sources:
         return [], []
-    exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
+    exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".heic", ".heif")
     images: List[Image.Image] = []
     names: List[str] = []
 
@@ -682,7 +681,7 @@ def load_contact_images(sources: Sequence[str]) -> Tuple[List[Image.Image], List
             except requests.RequestException as exc:
                 raise click.UsageError(f"Could not download image {source}: {exc}")
             try:
-                images.append(load_image_from_bytes(response.content))
+                images.append(load_image_from_bytes(response.content, source=source))
             except Exception as exc:
                 raise click.UsageError(f"Invalid image data from {source}: {exc}")
             names.append(source)
@@ -693,8 +692,7 @@ def load_contact_images(sources: Sequence[str]) -> Tuple[List[Image.Image], List
             for entry in sorted(os.listdir(path)):
                 if entry.lower().endswith(exts):
                     img_path = os.path.join(path, entry)
-                    img = Image.open(img_path)
-                    img.load()
+                    img = load_image_from_path(img_path)
                     images.append(img)
                     names.append(img_path)
             continue
@@ -703,8 +701,7 @@ def load_contact_images(sources: Sequence[str]) -> Tuple[List[Image.Image], List
             raise click.UsageError(f"missing file: {source}")
         if not path.lower().endswith(exts):
             raise click.UsageError(f"unsupported file type: {source}")
-        img = Image.open(path)
-        img.load()
+        img = load_image_from_path(path)
         images.append(img)
         names.append(path)
 
@@ -743,7 +740,7 @@ def gather_images_for_block(
         for url in preview_urls:
             try:
                 data = client.download_media(url)
-                img = load_image_from_bytes(data)
+                img = load_image_from_bytes(data, source=url)
                 return img, url
             except ArenaDownloadError as exc:
                 sys.stderr.write(f"Warning: Could not download preview {url}: {exc}\n")
@@ -755,7 +752,7 @@ def gather_images_for_block(
         if url and content_type.startswith("image/"):
             try:
                 data = client.download_media(url)
-                images.append(load_image_from_bytes(data))
+                images.append(load_image_from_bytes(data, source=url))
                 names.append(url)
                 return images, names
             except ArenaDownloadError as exc:
@@ -1129,13 +1126,13 @@ def image(ctx, files, no_cut, **kwargs):
 
     if img_bytes is not None:
         try:
-            images = [Image.open(io.BytesIO(img_bytes))]
+            images = [load_image_from_bytes(img_bytes, source="stdin")]
             names = ["stdin"]
         except Exception as e:
             click.echo(f"Invalid image data: {e}", err=True)
             sys.exit(1)
     else:
-        exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp")
+        exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".heic", ".heif")
         images = []
         names = []
         for p in files:
@@ -1149,7 +1146,7 @@ def image(ctx, files, no_cut, **kwargs):
                     click.echo(f"Could not download image {p}: {exc}", err=True)
                     sys.exit(1)
                 try:
-                    images.append(load_image_from_bytes(response.content))
+                    images.append(load_image_from_bytes(response.content, source=p))
                 except Exception as exc:
                     click.echo(f"Invalid image data from {p}: {exc}", err=True)
                     sys.exit(1)
@@ -1160,7 +1157,7 @@ def image(ctx, files, no_cut, **kwargs):
                 for e in sorted(os.listdir(p)):
                     if e.lower().endswith(exts):
                         img_path = os.path.join(p, e)
-                        images.append(Image.open(img_path))
+                        images.append(load_image_from_path(img_path))
                         names.append(img_path)
                 continue
 
@@ -1170,7 +1167,7 @@ def image(ctx, files, no_cut, **kwargs):
             if not p.lower().endswith(exts):
                 click.echo(f"unsupported file type: {p}", err=True)
                 sys.exit(1)
-            images.append(Image.open(p))
+            images.append(load_image_from_path(p))
             names.append(p)
 
         if not images:

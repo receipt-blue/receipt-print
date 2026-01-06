@@ -16,6 +16,7 @@ from PIL import Image
 
 from .arena import ArenaPrintJob, format_timestamp
 from .contact import ContactInfo, parse_vcards, print_contact_card
+from .image_loader import load_image_from_path
 from .image_utils import print_images_from_pil
 from .pdf_utils import pdf_to_images
 from .printer import connect_printer, maybe_cut, sanitize_output
@@ -438,6 +439,7 @@ def is_image_attachment(path: Path, mime_type: Optional[str]) -> bool:
         ".tiff",
         ".webp",
         ".heic",
+        ".heif",
     }
 
 
@@ -502,12 +504,11 @@ def load_message_media(
             continue
         if is_image_attachment(path, att.mime_type):
             try:
-                img = Image.open(path)
-                img.load()
+                img = load_image_from_path(path)
                 attachment_images.append(img)
                 attachment_names.append(str(path))
-            except Exception:
-                unsupported.append(str(path))
+            except Exception as exc:
+                unsupported.append(f"{path} ({exc})")
             continue
         if is_vcard_attachment(path, att.mime_type):
             try:

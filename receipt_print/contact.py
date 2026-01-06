@@ -1,6 +1,5 @@
 import base64
 import binascii
-import io
 import re
 import sys
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from urllib.parse import unquote, urlparse
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .image_loader import load_image_from_bytes, load_image_from_path
 from .image_utils import desired_orientation
 from .printer import (
     CHAR_WIDTH,
@@ -215,8 +215,7 @@ def _image_from_uri(value: str) -> Optional[Image.Image]:
     if not photo_path.is_file():
         return None
     try:
-        img = Image.open(photo_path)
-        img.load()
+        img = load_image_from_path(photo_path)
         return img
     except Exception:
         return None
@@ -224,8 +223,7 @@ def _image_from_uri(value: str) -> Optional[Image.Image]:
 
 def _image_from_bytes(data: bytes) -> Optional[Image.Image]:
     try:
-        img = Image.open(io.BytesIO(data))
-        img.load()
+        img = load_image_from_bytes(data)
         return img
     except Exception:
         return None

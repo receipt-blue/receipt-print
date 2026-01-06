@@ -16,6 +16,7 @@ dependencies = [
     "click>=8.2.1",
     "requests>=2.32.3",
     "qrcode>=8.0",
+    "pillow-heif>=0.15.0",
 ]
 
 [project.urls]

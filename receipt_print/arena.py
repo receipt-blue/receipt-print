@@ -1,5 +1,4 @@
 import hashlib
-import io
 import json
 import mimetypes
 import os
@@ -17,6 +16,7 @@ from urllib.parse import quote, unquote, urlparse
 import requests
 from PIL import Image
 
+from .image_loader import load_image_from_bytes
 from .image_utils import parse_caption_csv, print_images_from_pil
 from .pdf_utils import pdf_to_images
 from .printer import (
@@ -646,12 +646,6 @@ class ArenaPrintJob:
         if self.footer_text and not self._footer_printed:
             self.print_center_bold(self.footer_text)
             self._footer_printed = True
-
-
-def load_image_from_bytes(data: bytes) -> Image.Image:
-    img = Image.open(io.BytesIO(data))
-    img.load()
-    return img
 
 
 def video_frame_from_bytes(data: bytes, ffmpeg_path: Optional[str]) -> Image.Image:

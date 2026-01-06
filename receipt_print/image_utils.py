@@ -9,6 +9,7 @@ import numpy as np
 from escpos.exceptions import ImageWidthError
 from PIL import Image, ImageEnhance, ImageOps
 
+from .image_loader import load_image_from_path
 from .printer import CHAR_WIDTH, DOTS_PER_LINE, MAX_LINES, wrap_text
 
 
@@ -377,11 +378,9 @@ def print_images(
     names: List[str] = []
     for path in files:
         try:
-            img = Image.open(path)
-            img.load()
+            img = load_image_from_path(path)
             images.append(img.copy())
             names.append(path)
-            img.close()
         except Exception as e:
             sys.stderr.write(f"Warning: could not open {path}: {e}\n")
 
