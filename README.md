@@ -68,6 +68,7 @@ Configure using environment variables ([see python-escpos documentation](https:/
 
 - `RP_VENDOR`: USB vendor ID (default: 04b8)
 - `RP_PRODUCT`: USB product ID (default: 0e2a)
+- `RP_DEVICE`: Device file path (e.g., `/dev/usb/lp0`). Uses the kernel driver instead of libusb.
 - `RP_PROFILE`: Printer profile (default: TM-T20II)
 - `RP_HOST`: Network printer IP address (optional, fallback if USB fails)
 - `RP_CHAR_WIDTH`: Character width per line (default: 72)

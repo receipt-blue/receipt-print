@@ -5,10 +5,11 @@ import sys
 from typing import List, Optional, Tuple
 
 from escpos.exceptions import DeviceNotFoundError, USBNotFoundError
-from escpos.printer import Network, Usb
+from escpos.printer import File, Network, Usb
 
 # configuration
 NETWORK_HOST = os.getenv("RP_HOST")
+DEVICE_PATH = os.getenv("RP_DEVICE")
 VENDOR_HEX = os.getenv("RP_VENDOR", "04b8")
 PRODUCT_HEX = os.getenv("RP_PRODUCT", "0e2a")
 PRINTER_PROFILE = os.getenv("RP_PROFILE", "TM-T20II")
@@ -191,6 +192,11 @@ def maybe_cut(printer, no_cut: bool = False) -> None:
 
 def connect_printer():
     """connect to the ESC/POS printer"""
+    if DEVICE_PATH:
+        p = File(DEVICE_PATH, profile=PRINTER_PROFILE)
+        p.charcode(CHARCODE)
+        return p
+
     skip_usb = os.getenv("RP_NO_USB", "0") == "1"
     if not skip_usb:
         try:
