@@ -79,7 +79,7 @@ def _write_bold_section(formatter: click.HelpFormatter, title: str, records: Lis
     formatter.dedent()
 
 
-PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell"}
+PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell", "md"}
 
 
 class GroupedCommand(click.Command):
@@ -1024,6 +1024,84 @@ def shell(ctx, commands, no_wrap, wrap, no_cut):
         no_cut=resolve_no_cut(ctx, no_cut),
         wrap_mode=resolve_wrap(ctx, wrap),
     )
+
+
+@cli.command()
+@click.argument("files", nargs=-1)
+@click.option(
+    "--spacing",
+    type=int,
+    default=4,
+    help="Pixels between markdown blocks.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--dither",
+    help="Dithering algorithm: none, thresh, floyd, atkinson.",
+    cls=GroupedOption,
+    group=IMAGE_TUNING_GROUP,
+)
+@click.option(
+    "--threshold",
+    default="0.5",
+    help="Cutoff 0–1 for dithering.",
+    cls=GroupedOption,
+    group=IMAGE_TUNING_GROUP,
+)
+@click.option(
+    "--diffusion",
+    default="1.0",
+    help="Error diffusion strength (0=none, 1=classic).",
+    cls=GroupedOption,
+    group=IMAGE_TUNING_GROUP,
+)
+@add_no_cut_option
+@click.pass_context
+def md(ctx, files, spacing, dither, threshold, diffusion, no_cut):
+    """Print markdown rendered as images.
+
+    Renders markdown to rasterized images for the thermal printer.
+    Supports headings, bold, italic, code blocks, lists, tables,
+    blockquotes, and horizontal rules.
+    """
+    from .markdown_render import render_markdown_to_single_image
+    from .image_utils import apply_dither
+
+    effective_no_cut = resolve_no_cut(ctx, no_cut)
+
+    if files:
+        markdown_text = ""
+        for f in files:
+            try:
+                markdown_text += open(f).read() + "\n"
+            except Exception as e:
+                click.echo(f"Error reading {f}: {e}", err=True)
+                sys.exit(1)
+    else:
+        if not sys.stdin.isatty():
+            markdown_text = sys.stdin.read()
+        else:
+            click.echo("No markdown input provided.", err=True)
+            sys.exit(1)
+
+    if not markdown_text.strip():
+        click.echo("Empty markdown input.", err=True)
+        sys.exit(1)
+
+    img = render_markdown_to_single_image(markdown_text, spacing=spacing)
+
+    img = img.convert("RGB")
+
+    if dither:
+        threshold_val = float(threshold)
+        diffusion_val = float(diffusion)
+        img = apply_dither(img, dither.lower(), threshold_val, diffusion_val)
+
+    printer = connect_printer()
+    printer.image(img, impl="bitImageRaster")
+    maybe_cut(printer, no_cut=effective_no_cut)
+    printer.close()
 
 
 @cli.command()
