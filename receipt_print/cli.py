@@ -79,7 +79,7 @@ def _write_bold_section(formatter: click.HelpFormatter, title: str, records: Lis
     formatter.dedent()
 
 
-PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell", "md"}
+PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell", "md", "qr"}
 
 
 class GroupedCommand(click.Command):
@@ -1948,6 +1948,41 @@ for param in pdf.params:
         if "--no-autocontrast" in param.opts:
             param.hidden = False
             param.help = "Skip the auto-contrast pre-pass; only --contrast multipliers are applied."
+
+
+@cli.command()
+@click.argument("data", nargs=-1, required=True)
+@click.option(
+    "--size",
+    type=int,
+    default=4,
+    help="QR module size (printer dependent). Default: 4.",
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
+@click.option(
+    "--correction",
+    type=click.Choice(["L", "M", "Q", "H"]),
+    default="M",
+    help="Error correction level. Default: M.",
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
+@add_no_cut_option
+@click.pass_context
+def qr(ctx, data, size, correction, no_cut):
+    """Print QR codes."""
+    effective_no_cut = resolve_no_cut(ctx, no_cut)
+    ec = QR_LEVELS.get(correction, QR_ECLEVEL_M)
+    printer = connect_printer()
+    printer.set(align="center")
+    for item in data:
+        try:
+            printer.qr(item, size=size, ec=ec)
+        except Exception as exc:
+            sys.stderr.write(f"Error printing QR for {item}: {exc}\n")
+    maybe_cut(printer, no_cut=effective_no_cut)
+    printer.close()
 
 
 @cli.group(cls=GroupedGroup)
