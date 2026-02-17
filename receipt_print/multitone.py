@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 from PIL import Image, ImageEnhance
@@ -40,6 +40,7 @@ DEFAULT_PALETTE = np.array(sorted(DEFAULT_LEVEL_LUT.keys()), dtype=np.uint8)
 DEFAULT_LEVELS = np.array(
     [DEFAULT_LEVEL_LUT[int(v)] for v in DEFAULT_PALETTE], dtype=np.uint8
 )
+ESC_INIT = bytes([0x1B, 0x40])
 
 
 def _dither_to_levels(
@@ -148,8 +149,8 @@ def print_multitone_image(
     contrast: float = 1.0,
     white_clip: int = 248,
     diffusion: float = 1.0,
-    speed: int = 1,
-    heads_energizing: int = 1,
+    speed: Optional[int] = None,
+    heads_energizing: Optional[int] = None,
 ) -> None:
     raw = getattr(printer, "_raw", None)
     if not callable(raw):
@@ -181,19 +182,30 @@ def print_multitone_image(
     width_nbytes = (width + 7) // 8
     slice_lines = max(1, int(num_lines))
 
-    # Epson print density controls used by multi-tone calibration scripts.
-    raw(bytes([0x1D, 0x28, 0x4B, 0x02, 0x00, 0x61, int(heads_energizing) & 0xFF]))
-    raw(bytes([0x1D, 0x28, 0x4B, 0x02, 0x00, 0x32, int(speed) & 0xFF]))
+    # Reset printer state before/after multitone so mode changes do not leak.
+    raw(ESC_INIT)
+    try:
+        # Optional Epson print density controls.
+        if heads_energizing is not None:
+            raw(
+                bytes(
+                    [0x1D, 0x28, 0x4B, 0x02, 0x00, 0x61, int(heads_energizing) & 0xFF]
+                )
+            )
+        if speed is not None:
+            raw(bytes([0x1D, 0x28, 0x4B, 0x02, 0x00, 0x32, int(speed) & 0xFF]))
 
-    for y_start in range(0, height, slice_lines):
-        y_end = min(y_start + slice_lines, height)
-        slice_codes = codes[y_start:y_end, :]
-        slice_height = slice_codes.shape[0]
+        for y_start in range(0, height, slice_lines):
+            y_end = min(y_start + slice_lines, height)
+            slice_codes = codes[y_start:y_end, :]
+            slice_height = slice_codes.shape[0]
 
-        for plane_idx, color_code in enumerate((49, 50, 51, 52)):
-            mask = 0b1000 >> plane_idx
-            bitplane = _planar_bitplane(slice_codes, width, width_nbytes, mask)
-            raw(_gs_8_l_fn112_packet(bitplane, width, slice_height, color_code))
+            for plane_idx, color_code in enumerate((49, 50, 51, 52)):
+                mask = 0b1000 >> plane_idx
+                bitplane = _planar_bitplane(slice_codes, width, width_nbytes, mask)
+                raw(_gs_8_l_fn112_packet(bitplane, width, slice_height, color_code))
 
-        # GS ( L <Function 2>: print buffered graphics data.
-        raw(bytes([0x1D, 0x28, 0x4C, 0x02, 0x00, 0x30, 2]))
+            # GS ( L <Function 2>: print buffered graphics data.
+            raw(bytes([0x1D, 0x28, 0x4C, 0x02, 0x00, 0x30, 2]))
+    finally:
+        raw(ESC_INIT)

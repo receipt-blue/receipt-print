@@ -6,28 +6,28 @@ import re
 import shlex
 import shutil
 import sys
-from urllib.parse import urlparse
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
 from tempfile import NamedTemporaryFile
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import click
-from click.core import ParameterSource
 import requests
-from PIL import Image
+from click.core import ParameterSource
 from escpos.escpos import QR_ECLEVEL_H, QR_ECLEVEL_L, QR_ECLEVEL_M, QR_ECLEVEL_Q
+from PIL import Image
 
 from .arena import (
+    MEDIA_TIMEOUT,
+    USER_AGENT,
     ArenaClient,
     ArenaDownloadError,
     ArenaError,
     ArenaNotFound,
     ArenaPrintJob,
     ArenaUnauthorized,
-    MEDIA_TIMEOUT,
-    USER_AGENT,
     ChannelIterator,
     block_attachment,
     block_class,
@@ -39,12 +39,12 @@ from .arena import (
     block_user_name,
     canonical_block_url,
     canonical_channel_url,
+    format_timestamp,
     load_image_from_bytes,
     parse_block_identifier,
     parse_channel_identifier,
     parse_timestamp,
     pdf_bytes_to_images,
-    format_timestamp,
     should_include_block,
     video_frame_from_bytes,
 )
@@ -56,8 +56,8 @@ from .printer import (
     env_no_cut,
     maybe_cut,
     print_text,
-    scaled_char_width,
     sanitize_output,
+    scaled_char_width,
     wrap_text,
 )
 from .shell import run_shell_commands
@@ -69,7 +69,9 @@ class GroupedOption(click.Option):
         super().__init__(*args, **kwargs)
 
 
-def _write_bold_section(formatter: click.HelpFormatter, title: str, records: List[tuple[str, str]]) -> None:
+def _write_bold_section(
+    formatter: click.HelpFormatter, title: str, records: List[tuple[str, str]]
+) -> None:
     if not records:
         return
     formatter.write("\n")
@@ -203,6 +205,7 @@ PDF_IMAGE_TUNING_DEFAULTS: Dict[str, Any] = {
 }
 
 IMAGE_OPTION_FALLBACK_DEFAULTS: Dict[str, Any] = {
+    "preset": "none",
     "dither": None,
     "threshold": "0.5",
     "diffusion": "1.0",
@@ -213,6 +216,41 @@ IMAGE_OPTION_FALLBACK_DEFAULTS: Dict[str, Any] = {
     "multitone": False,
     "multitone_white_clip": 248,
     "multitone_diffusion": 1.0,
+}
+
+IMAGE_TUNING_PRESETS: Dict[str, Dict[str, Any]] = {
+    "bilevel": {
+        "multitone": False,
+        "autocontrast": False,
+        "brightness": "1.0",
+        "contrast": "1.0",
+        "gamma": "1.0",
+        "dither": "none",
+        "threshold": "0.5",
+        "diffusion": "1.0",
+    },
+    "bilevel-dither": {
+        "multitone": False,
+        "autocontrast": True,
+        "brightness": "1.0",
+        "contrast": "1.15",
+        "gamma": "1.0",
+        "dither": "atkinson",
+        "threshold": "0.47",
+        "diffusion": "1.0",
+    },
+    "multitone": {
+        "multitone": True,
+        "autocontrast": False,
+        "brightness": "1.0",
+        "contrast": "1.0",
+        "gamma": "1.0",
+        "dither": "none",
+        "threshold": "0.5",
+        "diffusion": "1.0",
+        "multitone_white_clip": 252,
+        "multitone_diffusion": 0.2,
+    },
 }
 
 
@@ -406,6 +444,18 @@ core_image_options = [
 
 sugar_image_options = [
     click.option(
+        "--preset",
+        type=click.Choice(
+            ["none", "bilevel", "bilevel-dither", "multitone"],
+            case_sensitive=False,
+        ),
+        default="none",
+        show_default=True,
+        help="Apply a bundled image tuning preset.",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
+    ),
+    click.option(
         "--multitone/--no-multitone",
         default=False,
         help="Use Epson GS 8 L 4-bit multi-tone image output (supported models only).",
@@ -496,7 +546,9 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     contrast = parse_comma_separated(kwargs.get("contrast"), float)
     gamma_vals = parse_comma_separated(kwargs.get("gamma"), float)
     autocontrast_val = kwargs.get("autocontrast", None)
-    autocontrast = bool(autocontrast_val) if autocontrast_val not in (None, "") else False
+    autocontrast = (
+        bool(autocontrast_val) if autocontrast_val not in (None, "") else False
+    )
     multitone = bool(kwargs.get("multitone", False))
     multitone_white_clip = int(kwargs.get("multitone_white_clip", 248))
     multitone_diffusion = float(kwargs.get("multitone_diffusion", 1.0))
@@ -550,6 +602,26 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         spacing=kwargs["spacing"],
         wrap_mode=wrap_mode,
     )
+
+
+def apply_image_preset_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    preset = (kwargs.get("preset") or "none").lower()
+    if preset == "none":
+        return kwargs
+
+    preset_values = IMAGE_TUNING_PRESETS.get(preset)
+    if not preset_values:
+        return kwargs
+
+    sentinel = object()
+    for key, value in preset_values.items():
+        fallback = IMAGE_OPTION_FALLBACK_DEFAULTS.get(key, sentinel)
+        current = kwargs.get(key, sentinel)
+        if fallback is sentinel:
+            continue
+        if current == fallback:
+            kwargs[key] = value
+    return kwargs
 
 
 def create_arena_image_config(
@@ -899,7 +971,11 @@ def compute_channel_heading(meta: Optional[Dict[str, Any]]) -> List[str]:
 
 
 def print_with_images(
-    config: ImageProcessingConfig, images, names=None, heading=None, no_cut: bool = False
+    config: ImageProcessingConfig,
+    images,
+    names=None,
+    heading=None,
+    no_cut: bool = False,
 ):
     """Print images with common workflow"""
     printer = connect_printer()
@@ -1107,8 +1183,17 @@ def md(ctx, files, spacing, dither, threshold, diffusion, no_cut):
     Supports headings, bold, italic, code blocks, lists, tables,
     blockquotes, and horizontal rules.
     """
-    from .markdown_render import render_markdown_to_single_image
     from .image_utils import apply_dither
+    from .markdown_render import render_markdown_to_single_image
+
+    """Print markdown rendered as images.
+
+    Renders markdown to rasterized images for the thermal printer.
+    Supports headings, bold, italic, code blocks, lists, tables,
+    blockquotes, and horizontal rules.
+    """
+    from .image_utils import apply_dither
+    from .markdown_render import render_markdown_to_single_image
 
     effective_no_cut = resolve_no_cut(ctx, no_cut)
 
@@ -1164,12 +1249,9 @@ def image(ctx, files, no_cut, **kwargs):
                 txt = ""
             parts = shlex.split(txt)
             if parts and all(
-                is_http_url(p) or os.path.exists(os.path.expanduser(p))
-                for p in parts
+                is_http_url(p) or os.path.exists(os.path.expanduser(p)) for p in parts
             ):
-                files = [
-                    p if is_http_url(p) else os.path.expanduser(p) for p in parts
-                ]
+                files = [p if is_http_url(p) else os.path.expanduser(p) for p in parts]
             else:
                 img_bytes = data if data else None
         else:
@@ -1226,6 +1308,7 @@ def image(ctx, files, no_cut, **kwargs):
             click.echo("No usable images found.", err=True)
             sys.exit(1)
 
+    kwargs = apply_image_preset_kwargs(kwargs)
     kwargs["wrap"] = resolve_wrap(ctx, kwargs.get("wrap"))
     config = create_image_config(**kwargs)
     print_with_images(
@@ -1944,6 +2027,8 @@ def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
     if not images:
         click.echo("No pages to print.", err=True)
         return
+
+    kwargs = apply_image_preset_kwargs(kwargs)
 
     get_source = getattr(ctx, "get_parameter_source", None)
     sentinel = object()
