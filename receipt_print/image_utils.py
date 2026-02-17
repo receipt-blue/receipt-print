@@ -9,6 +9,7 @@ import numpy as np
 from escpos.exceptions import ImageWidthError
 from PIL import Image, ImageEnhance, ImageOps
 
+from .multitone import print_multitone_image
 from .printer import CHAR_WIDTH, DOTS_PER_LINE, MAX_LINES, wrap_text
 
 
@@ -148,6 +149,7 @@ def print_images_from_pil(
     contrast_list: Optional[List[float]] = None,
     gamma_list: Optional[List[float]] = None,
     autocontrast: bool = False,
+    multitone: bool = False,
     auto_orient: bool = False,
     cut_between: bool = False,
     no_cut: bool = False,
@@ -289,12 +291,14 @@ def print_images_from_pil(
         if debug:
             printer.set(align="left")
             print_wrapped(f"[DEBUG] file={name}")
+            path_label = "multitone-gs8l" if multitone else method
             print_wrapped(
                 f"[DEBUG] align={al}, scale={scale:.2f}, "
-                f"method={method}, dither={dith}, "
+                f"method={path_label}, dither={dith}, "
                 f"threshold={thresh:.2f}, diffusion={diff:.2f}, "
                 f"brightness={brightness_val:.2f}, contrast={contrast_val:.2f}, "
-                f"gamma={gamma_val:.2f}, autocontrast={autocontrast}"
+                f"gamma={gamma_val:.2f}, autocontrast={autocontrast}, "
+                f"multitone={multitone}"
             )
             printer.set(align="left")
 
@@ -309,10 +313,14 @@ def print_images_from_pil(
             except Exception:
                 pass
 
-        img2 = apply_dither(im, dith, thresh, diff)
-        printer.set(align=esc_align)
+        target_align = "center" if center else esc_align
+        printer.set(align=target_align)
         try:
-            printer.image(img_source=img2, center=center, impl=impl)
+            if multitone:
+                print_multitone_image(printer, im)
+            else:
+                img2 = apply_dither(im, dith, thresh, diff)
+                printer.image(img_source=img2, center=center, impl=impl)
 
             caption_idx = caption_start + idx
             caption_text = None
@@ -370,6 +378,7 @@ def print_images(
     contrast_list: Optional[List[float]] = None,
     gamma_list: Optional[List[float]] = None,
     autocontrast: bool = False,
+    multitone: bool = False,
     no_cut: bool = False,
     wrap_mode: str = "hyphen",
 ):
@@ -407,6 +416,7 @@ def print_images(
         contrast_list=contrast_list,
         gamma_list=gamma_list,
         autocontrast=autocontrast,
+        multitone=multitone,
         wrap_mode=wrap_mode,
         no_cut=no_cut,
     )

@@ -160,6 +160,7 @@ class ImageProcessingConfig:
     contrast: List[float] = field(default_factory=lambda: [1.0])
     gamma: List[float] = field(default_factory=lambda: [1.0])
     autocontrast: bool = False
+    multitone: bool = False
     captions_str: Optional[str] = None
     footer_text: Optional[str] = None
     debug: bool = False
@@ -207,6 +208,7 @@ IMAGE_OPTION_FALLBACK_DEFAULTS: Dict[str, Any] = {
     "contrast": "1.0",
     "gamma": "1.0",
     "autocontrast": None,
+    "multitone": False,
 }
 
 
@@ -400,6 +402,13 @@ core_image_options = [
 
 sugar_image_options = [
     click.option(
+        "--multitone/--no-multitone",
+        default=False,
+        help="Use Epson GS 8 L 4-bit multi-tone image output (supported models only).",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
+    ),
+    click.option(
         "--scale",
         default="1.0",
         help="Comma-separated floats for per-image scale.",
@@ -466,6 +475,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     gamma_vals = parse_comma_separated(kwargs.get("gamma"), float)
     autocontrast_val = kwargs.get("autocontrast", None)
     autocontrast = bool(autocontrast_val) if autocontrast_val not in (None, "") else False
+    multitone = bool(kwargs.get("multitone", False))
 
     if not brightness:
         brightness = [1.0]
@@ -504,6 +514,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         contrast=contrast,
         gamma=gamma_vals,
         autocontrast=autocontrast,
+        multitone=multitone,
         ts_fmt=ts_fmt,
         captions_str=kwargs["caption"],
         footer_text=kwargs["footer"],
@@ -895,6 +906,7 @@ def print_with_images(
         debug=config.debug,
         spacing=config.spacing,
         names=names,
+        multitone=config.multitone,
         wrap_mode=config.wrap_mode,
         no_cut=no_cut,
     )
