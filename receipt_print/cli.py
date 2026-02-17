@@ -169,6 +169,8 @@ class ImageProcessingConfig:
     footer_text: Optional[str] = None
     debug: bool = False
     spacing: int = 1
+    left_pad: float = 0.0
+    right_pad: float = 0.0
     wrap_mode: str = "hyphen"
 
 
@@ -316,6 +318,31 @@ def validate_diffusion(value):
     return value >= 0.0
 
 
+def resolve_edge_pad(option_value: Optional[float], cli_name: str, env_name: str) -> float:
+    if option_value is not None:
+        value = float(option_value)
+        if not 0.0 <= value <= EDGE_PAD_MAX:
+            raise click.BadParameter(
+                f"--{cli_name} must be between 0.0 and {EDGE_PAD_MAX}"
+            )
+        return value
+
+    raw = os.getenv(env_name)
+    if raw in (None, ""):
+        return 0.0
+    try:
+        env_val = float(raw)
+    except ValueError:
+        sys.stderr.write(f"Warning: invalid {env_name} value '{raw}'; using 0.0.\n")
+        return 0.0
+    if not 0.0 <= env_val <= EDGE_PAD_MAX:
+        sys.stderr.write(
+            f"Warning: {env_name} must be between 0.0 and {EDGE_PAD_MAX}; using 0.0.\n"
+        )
+        return 0.0
+    return env_val
+
+
 # Common image processing options
 def _apply_options(func, options):
     for option in reversed(options):
@@ -333,6 +360,9 @@ PDF_GROUP = "PDF handling"
 ARENA_CONTENT_GROUP = "content filters"
 QR_GROUP = "QR codes"
 NETWORK_GROUP = "cache, networking"
+LEFT_PAD_ENV = "RP_LEFT_PAD"
+RIGHT_PAD_ENV = "RP_RIGHT_PAD"
+EDGE_PAD_MAX = 0.4
 
 
 def add_no_cut_option(func):
@@ -429,6 +459,24 @@ core_image_options = [
         type=int,
         default=1,
         help="Blank lines between each image.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
+    ),
+    click.option(
+        "--left-pad",
+        type=float,
+        default=None,
+        show_default=False,
+        help="Reserve left whitespace as a fraction of printable width (e.g. 0.08). Env: RP_LEFT_PAD.",
+        cls=GroupedOption,
+        group=IMAGE_LAYOUT_GROUP,
+    ),
+    click.option(
+        "--right-pad",
+        type=float,
+        default=None,
+        show_default=False,
+        help="Reserve right whitespace as a fraction of printable width (e.g. 0.08). Env: RP_RIGHT_PAD.",
         cls=GroupedOption,
         group=IMAGE_LAYOUT_GROUP,
     ),
@@ -552,6 +600,8 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     multitone = bool(kwargs.get("multitone", False))
     multitone_white_clip = int(kwargs.get("multitone_white_clip", 248))
     multitone_diffusion = float(kwargs.get("multitone_diffusion", 1.0))
+    left_pad = resolve_edge_pad(kwargs.get("left_pad"), "left-pad", LEFT_PAD_ENV)
+    right_pad = resolve_edge_pad(kwargs.get("right_pad"), "right-pad", RIGHT_PAD_ENV)
     if multitone_diffusion < 0:
         raise click.BadParameter("--multitone-diffusion must be >= 0")
 
@@ -600,6 +650,8 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         footer_text=kwargs["footer"],
         debug=kwargs["debug"],
         spacing=kwargs["spacing"],
+        left_pad=left_pad,
+        right_pad=right_pad,
         wrap_mode=wrap_mode,
     )
 
@@ -637,6 +689,8 @@ def create_arena_image_config(
     contrast: str,
     gamma: str,
     autocontrast: bool,
+    left_pad: Optional[float],
+    right_pad: Optional[float],
     wrap: Optional[str],
 ) -> ImageProcessingConfig:
     """Build an ImageProcessingConfig for Are.na printing with defaults."""
@@ -657,6 +711,8 @@ def create_arena_image_config(
         "contrast": contrast,
         "gamma": gamma,
         "autocontrast": autocontrast,
+        "left_pad": left_pad,
+        "right_pad": right_pad,
         "wrap": wrap,
     }
     return create_image_config(**kwargs)
@@ -1009,6 +1065,8 @@ def print_with_images(
         footer_text=config.footer_text,
         debug=config.debug,
         spacing=config.spacing,
+        left_pad=config.left_pad,
+        right_pad=config.right_pad,
         names=names,
         multitone=config.multitone,
         multitone_white_clip=config.multitone_white_clip,
@@ -1439,6 +1497,8 @@ def arena_block(
     contrast,
     gamma,
     autocontrast,
+    left_pad,
+    right_pad,
     video,
     ffmpeg,
     pdf,
@@ -1474,6 +1534,8 @@ def arena_block(
         contrast,
         gamma,
         autocontrast,
+        left_pad,
+        right_pad,
         wrap_mode,
     )
 
@@ -1495,6 +1557,8 @@ def arena_block(
         config.captions_str,
         config.spacing,
         footer,
+        left_pad=config.left_pad,
+        right_pad=config.right_pad,
         debug=config.debug,
         wrap_mode=wrap_mode,
         no_cut=effective_no_cut,
@@ -1720,6 +1784,8 @@ def arena_channel(
     contrast,
     gamma,
     autocontrast,
+    left_pad,
+    right_pad,
     video,
     ffmpeg,
     pdf,
@@ -1771,6 +1837,8 @@ def arena_channel(
         contrast,
         gamma,
         autocontrast,
+        left_pad,
+        right_pad,
         wrap_mode,
     )
     qr_cfg = QRConfig(
@@ -1847,6 +1915,8 @@ def arena_channel(
         config.captions_str,
         config.spacing,
         None if cut_mode else footer,
+        left_pad=config.left_pad,
+        right_pad=config.right_pad,
         debug=config.debug,
         wrap_mode=wrap_mode,
         auto_orient=cut_mode,

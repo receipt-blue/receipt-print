@@ -468,6 +468,8 @@ class ArenaPrintJob:
         captions_str: Optional[str],
         spacing: int,
         footer_text: Optional[str],
+        left_pad: float = 0.0,
+        right_pad: float = 0.0,
         debug: bool = False,
         wrap_mode: str = "hyphen",
         auto_orient: bool = False,
@@ -489,6 +491,8 @@ class ArenaPrintJob:
         self.captions = parse_caption_csv(captions_str)
         self.spacing = spacing
         self.footer_text = footer_text
+        self.left_pad = left_pad
+        self.right_pad = right_pad
         self.debug = debug
         self.wrap_mode = wrap_mode.lower() if wrap_mode else "hyphen"
         self.caption_index = 0
@@ -631,6 +635,8 @@ class ArenaPrintJob:
             footer_text=None,
             debug=self.debug,
             spacing=0 if self.cut_between_images else self.spacing,
+            left_pad=self.left_pad,
+            right_pad=self.right_pad,
             names=names,
             wrap_mode=self.wrap_mode,
             auto_orient=self.auto_orient_images,

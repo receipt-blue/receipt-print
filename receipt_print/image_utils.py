@@ -43,6 +43,7 @@ FS_KERNEL = [
     (0, 1, 5 / 16),
     (+1, 1, 1 / 16),
 ]
+EDGE_PAD_NEAR_FULL_THRESHOLD = 0.90
 
 
 def desired_orientation(al: str) -> str:
@@ -63,6 +64,39 @@ def apply_alignment(al: str, orient: str) -> tuple[str, bool]:
     if al == "right":
         return ("right", False)
     return ("left", False)
+
+
+def _apply_edge_pad_compensation(
+    image: Image.Image,
+    max_width: int,
+    left_pad: float,
+    right_pad: float,
+    align: str,
+) -> tuple[Image.Image, bool]:
+    if left_pad <= 0.0 and right_pad <= 0.0:
+        return image, False
+    # Preserve explicit edge alignment intent for one-sided compensation.
+    if align == "left" and left_pad > 0.0 and right_pad <= 0.0:
+        return image, False
+    if align == "right" and right_pad > 0.0 and left_pad <= 0.0:
+        return image, False
+    if image.width < max_width * EDGE_PAD_NEAR_FULL_THRESHOLD:
+        return image, False
+
+    total_pad = left_pad + right_pad
+    target_content_width = max(1, int(math.floor(max_width * (1.0 - total_pad))))
+    if image.width > target_content_width:
+        ratio = target_content_width / image.width
+        image = image.resize(
+            (target_content_width, int(image.height * ratio)),
+            Image.Resampling.LANCZOS,
+        )
+
+    canvas = Image.new("RGB", (max_width, image.height), "white")
+    left_offset = int(math.floor(max_width * left_pad))
+    max_offset = max(0, max_width - image.width)
+    canvas.paste(image.convert("RGB"), (min(left_offset, max_offset), 0))
+    return canvas, True
 
 
 def _apply_gamma(image: Image.Image, gamma: float) -> Image.Image:
@@ -144,6 +178,8 @@ def print_images_from_pil(
     footer_text: Optional[str] = None,
     debug: bool = False,
     spacing: int = 1,
+    left_pad: float = 0.0,
+    right_pad: float = 0.0,
     names: Optional[Iterable[str]] = None,
     brightness_list: Optional[List[float]] = None,
     contrast_list: Optional[List[float]] = None,
@@ -243,6 +279,13 @@ def print_images_from_pil(
             im = preprocess_image(
                 im, brightness_val, contrast_val, gamma_val, autocontrast
             )
+        im, edge_pad_applied = _apply_edge_pad_compensation(
+            im,
+            max_width=max_width,
+            left_pad=left_pad,
+            right_pad=right_pad,
+            align=al,
+        )
 
         total_lines += math.ceil(im.height / DOTS_PER_LINE)
         processed.append(
@@ -256,6 +299,7 @@ def print_images_from_pil(
                 brightness_val,
                 contrast_val,
                 gamma_val,
+                edge_pad_applied,
             )
         )
 
@@ -282,6 +326,7 @@ def print_images_from_pil(
         brightness_val,
         contrast_val,
         gamma_val,
+        edge_pad_applied,
     ) in processed:
         method = get(method_list, idx)
         impl = impl_map[method]
@@ -300,6 +345,9 @@ def print_images_from_pil(
                 f"threshold={thresh:.2f}, diffusion={diff:.2f}, "
                 f"brightness={brightness_val:.2f}, contrast={contrast_val:.2f}, "
                 f"gamma={gamma_val:.2f}, autocontrast={autocontrast}, "
+                f"left_pad={left_pad:.3f}, right_pad={right_pad:.3f}, "
+                f"edge_pad_applied={edge_pad_applied}, "
+                f"final_width={im.width}, "
                 f"multitone={multitone}, "
                 f"multitone_white_clip={multitone_white_clip}, "
                 f"multitone_diffusion={multitone_diffusion:.2f}"
@@ -383,6 +431,8 @@ def print_images(
     footer_text: Optional[str] = None,
     debug: bool = False,
     spacing: int = 1,
+    left_pad: float = 0.0,
+    right_pad: float = 0.0,
     brightness_list: Optional[List[float]] = None,
     contrast_list: Optional[List[float]] = None,
     gamma_list: Optional[List[float]] = None,
@@ -422,6 +472,8 @@ def print_images(
         footer_text=footer_text,
         debug=debug,
         spacing=spacing,
+        left_pad=left_pad,
+        right_pad=right_pad,
         names=names,
         brightness_list=brightness_list,
         contrast_list=contrast_list,
