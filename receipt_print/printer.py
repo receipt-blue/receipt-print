@@ -19,6 +19,7 @@ MAX_LINES = int(os.getenv("RP_MAX_LINES", "40"))
 DOTS_PER_LINE = 24  # ~1 text line per 24 px
 WRAP_MODES = {"hyphen", "word", "none"}
 WRAP_TOKEN_RE = re.compile(r"\S+|\s+")
+SPEED_OVERRIDE_ENV = "RP_SPEED_OVERRIDE"
 
 
 def remove_ansi(text: str) -> str:
@@ -190,11 +191,41 @@ def maybe_cut(printer, no_cut: bool = False) -> None:
         printer.cut()
 
 
+def _resolve_speed() -> Optional[int]:
+    value = os.getenv(SPEED_OVERRIDE_ENV)
+    if value in (None, ""):
+        value = os.getenv("RP_SPEED")
+    if value in (None, ""):
+        return None
+    try:
+        speed = int(value)
+    except ValueError:
+        sys.stderr.write(f"Invalid speed value '{value}' for {SPEED_OVERRIDE_ENV}/RP_SPEED.\n")
+        return None
+    if not 0 <= speed <= 255:
+        sys.stderr.write("Speed must be between 0 and 255.\n")
+        return None
+    return speed
+
+
+def _apply_speed(printer, speed: Optional[int]) -> None:
+    if speed is None:
+        return
+    try:
+        raw = getattr(printer, "_raw", None)
+        if callable(raw):
+            raw(bytes([0x1D, 0x28, 0x4B, 0x02, 0x00, 0x32, speed & 0xFF]))
+    except Exception as exc:
+        sys.stderr.write(f"Warning: could not apply printer speed {speed}: {exc}\n")
+
+
 def connect_printer():
     """connect to the ESC/POS printer"""
+    speed = _resolve_speed()
     if DEVICE_PATH:
         p = File(DEVICE_PATH, profile=PRINTER_PROFILE)
         p.charcode(CHARCODE)
+        _apply_speed(p, speed)
         return p
 
     skip_usb = os.getenv("RP_NO_USB", "0") == "1"
@@ -215,6 +246,7 @@ def connect_printer():
                 p = Usb(profile=PRINTER_PROFILE, backend=backend)
             p.open()
             p.charcode(CHARCODE)
+            _apply_speed(p, speed)
             return p
         except (USBNotFoundError, DeviceNotFoundError, Exception):
             sys.stderr.write("USB printer not found; falling back to network.\n")
@@ -225,6 +257,7 @@ def connect_printer():
 
     p = Network(host=NETWORK_HOST, profile=PRINTER_PROFILE)
     p.charcode(CHARCODE)
+    _apply_speed(p, speed)
     return p
 
 

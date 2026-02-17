@@ -1024,9 +1024,20 @@ def print_with_images(
 @click.group(cls=GroupedGroup, invoke_without_command=True)
 @add_wrap_option
 @add_no_cut_option
+@click.option(
+    "--speed",
+    type=click.IntRange(0, 255),
+    default=None,
+    show_default=False,
+    help="Set printer speed for this run (applies to all commands).",
+    cls=GroupedOption,
+    group=OUTPUT_GROUP,
+)
 @click.pass_context
-def cli(ctx, wrap, no_cut):
+def cli(ctx, wrap, no_cut, speed):
     """Print text or images to a receipt printer."""
+    if speed is not None:
+        os.environ["RP_SPEED_OVERRIDE"] = str(speed)
     if ctx.invoked_subcommand is None:
         if not sys.stdin.isatty():
             print_text(
@@ -1177,15 +1188,6 @@ def shell(ctx, commands, no_wrap, wrap, no_cut):
 @add_no_cut_option
 @click.pass_context
 def md(ctx, files, spacing, dither, threshold, diffusion, no_cut):
-    """Print markdown rendered as images.
-
-    Renders markdown to rasterized images for the thermal printer.
-    Supports headings, bold, italic, code blocks, lists, tables,
-    blockquotes, and horizontal rules.
-    """
-    from .image_utils import apply_dither
-    from .markdown_render import render_markdown_to_single_image
-
     """Print markdown rendered as images.
 
     Renders markdown to rasterized images for the thermal printer.

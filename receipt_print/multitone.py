@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Iterable, Optional, Sequence
 
 import numpy as np
@@ -140,6 +141,23 @@ def _gs_8_l_fn112_packet(
     ) + bytes(bitplane)
 
 
+def _resolve_speed_override(explicit_speed: Optional[int]) -> Optional[int]:
+    if explicit_speed is not None:
+        return int(explicit_speed) & 0xFF
+    value = os.getenv("RP_SPEED_OVERRIDE")
+    if value in (None, ""):
+        value = os.getenv("RP_SPEED")
+    if value in (None, ""):
+        return None
+    try:
+        speed = int(value)
+    except ValueError:
+        return None
+    if not 0 <= speed <= 255:
+        return None
+    return speed
+
+
 def print_multitone_image(
     printer,
     image: Image.Image,
@@ -185,6 +203,7 @@ def print_multitone_image(
     # Reset printer state before/after multitone so mode changes do not leak.
     raw(ESC_INIT)
     try:
+        effective_speed = _resolve_speed_override(speed)
         # Optional Epson print density controls.
         if heads_energizing is not None:
             raw(
@@ -192,8 +211,8 @@ def print_multitone_image(
                     [0x1D, 0x28, 0x4B, 0x02, 0x00, 0x61, int(heads_energizing) & 0xFF]
                 )
             )
-        if speed is not None:
-            raw(bytes([0x1D, 0x28, 0x4B, 0x02, 0x00, 0x32, int(speed) & 0xFF]))
+        if effective_speed is not None:
+            raw(bytes([0x1D, 0x28, 0x4B, 0x02, 0x00, 0x32, effective_speed]))
 
         for y_start in range(0, height, slice_lines):
             y_end = min(y_start + slice_lines, height)
