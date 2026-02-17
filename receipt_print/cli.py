@@ -162,6 +162,7 @@ class ImageProcessingConfig:
     autocontrast: bool = False
     multitone: bool = False
     multitone_white_clip: int = 248
+    multitone_diffusion: float = 1.0
     captions_str: Optional[str] = None
     footer_text: Optional[str] = None
     debug: bool = False
@@ -211,6 +212,7 @@ IMAGE_OPTION_FALLBACK_DEFAULTS: Dict[str, Any] = {
     "autocontrast": None,
     "multitone": False,
     "multitone_white_clip": 248,
+    "multitone_diffusion": 1.0,
 }
 
 
@@ -420,6 +422,15 @@ sugar_image_options = [
         group=IMAGE_TUNING_GROUP,
     ),
     click.option(
+        "--multitone-diffusion",
+        type=float,
+        default=1.0,
+        show_default=True,
+        help="When --multitone is enabled, error diffusion strength (0=off, 1=full).",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
+    ),
+    click.option(
         "--scale",
         default="1.0",
         help="Comma-separated floats for per-image scale.",
@@ -488,6 +499,9 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     autocontrast = bool(autocontrast_val) if autocontrast_val not in (None, "") else False
     multitone = bool(kwargs.get("multitone", False))
     multitone_white_clip = int(kwargs.get("multitone_white_clip", 248))
+    multitone_diffusion = float(kwargs.get("multitone_diffusion", 1.0))
+    if multitone_diffusion < 0:
+        raise click.BadParameter("--multitone-diffusion must be >= 0")
 
     if not brightness:
         brightness = [1.0]
@@ -528,6 +542,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         autocontrast=autocontrast,
         multitone=multitone,
         multitone_white_clip=multitone_white_clip,
+        multitone_diffusion=multitone_diffusion,
         ts_fmt=ts_fmt,
         captions_str=kwargs["caption"],
         footer_text=kwargs["footer"],
@@ -921,6 +936,7 @@ def print_with_images(
         names=names,
         multitone=config.multitone,
         multitone_white_clip=config.multitone_white_clip,
+        multitone_diffusion=config.multitone_diffusion,
         wrap_mode=config.wrap_mode,
         no_cut=no_cut,
     )

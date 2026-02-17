@@ -48,6 +48,7 @@ def _dither_to_levels(
     levels: np.ndarray,
     kernel: Sequence[tuple[int, int, float]],
     serpentine: bool = True,
+    diffusion: float = 1.0,
 ) -> np.ndarray:
     source = np.asarray(gray.convert("L"), dtype=np.uint8)
     work = source.astype(np.float32, copy=True)
@@ -82,7 +83,7 @@ def _dither_to_levels(
             new = float(palette[idx])
             out_idx[y, x] = idx
             work[y, x] = new
-            err = old - new
+            err = (old - new) * max(0.0, float(diffusion))
 
             for dx, dy, weight in kernel:
                 nx = x + dx if direction > 0 else x - dx
@@ -146,6 +147,7 @@ def print_multitone_image(
     sharpness: float = 1.0,
     contrast: float = 1.0,
     white_clip: int = 248,
+    diffusion: float = 1.0,
     speed: int = 1,
     heads_energizing: int = 1,
 ) -> None:
@@ -172,6 +174,7 @@ def print_multitone_image(
         levels=DEFAULT_LEVELS,
         kernel=DEFAULT_DIFFUSION_KERNEL,
         serpentine=True,
+        diffusion=diffusion,
     )
 
     height, width = codes.shape

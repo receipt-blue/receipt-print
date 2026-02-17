@@ -151,6 +151,7 @@ def print_images_from_pil(
     autocontrast: bool = False,
     multitone: bool = False,
     multitone_white_clip: int = 248,
+    multitone_diffusion: float = 1.0,
     auto_orient: bool = False,
     cut_between: bool = False,
     no_cut: bool = False,
@@ -300,7 +301,8 @@ def print_images_from_pil(
                 f"brightness={brightness_val:.2f}, contrast={contrast_val:.2f}, "
                 f"gamma={gamma_val:.2f}, autocontrast={autocontrast}, "
                 f"multitone={multitone}, "
-                f"multitone_white_clip={multitone_white_clip}"
+                f"multitone_white_clip={multitone_white_clip}, "
+                f"multitone_diffusion={multitone_diffusion:.2f}"
             )
             printer.set(align="left")
 
@@ -320,7 +322,10 @@ def print_images_from_pil(
         try:
             if multitone:
                 print_multitone_image(
-                    printer, im, white_clip=int(multitone_white_clip)
+                    printer,
+                    im,
+                    white_clip=int(multitone_white_clip),
+                    diffusion=float(multitone_diffusion),
                 )
             else:
                 img2 = apply_dither(im, dith, thresh, diff)
@@ -384,6 +389,7 @@ def print_images(
     autocontrast: bool = False,
     multitone: bool = False,
     multitone_white_clip: int = 248,
+    multitone_diffusion: float = 1.0,
     no_cut: bool = False,
     wrap_mode: str = "hyphen",
 ):
@@ -423,6 +429,7 @@ def print_images(
         autocontrast=autocontrast,
         multitone=multitone,
         multitone_white_clip=multitone_white_clip,
+        multitone_diffusion=multitone_diffusion,
         wrap_mode=wrap_mode,
         no_cut=no_cut,
     )
