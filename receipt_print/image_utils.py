@@ -69,8 +69,8 @@ def _apply_gamma(image: Image.Image, gamma: float) -> Image.Image:
     if math.isclose(gamma, 1.0, rel_tol=1e-3):
         return image
     gamma = max(gamma, 1e-3)
-    inv = 1.0 / gamma
-    lut = [min(255, max(0, int((i / 255.0) ** inv * 255 + 0.5))) for i in range(256)]
+    # gamma < 1 brightens, gamma > 1 darkens.
+    lut = [min(255, max(0, int((i / 255.0) ** gamma * 255 + 0.5))) for i in range(256)]
     bands = len(image.getbands())
     return image.point(lut * bands)
 
