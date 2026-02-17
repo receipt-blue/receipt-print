@@ -33,7 +33,7 @@ DEFAULT_LEVEL_LUT: dict[int, int] = {
     210: 7,
     242: 6,
     251: 5,
-    255: 4,
+    255: 0,
 }
 
 DEFAULT_PALETTE = np.array(sorted(DEFAULT_LEVEL_LUT.keys()), dtype=np.uint8)
@@ -145,6 +145,7 @@ def print_multitone_image(
     num_lines: int = 100,
     sharpness: float = 1.0,
     contrast: float = 1.0,
+    white_clip: int = 248,
     speed: int = 1,
     heads_energizing: int = 1,
 ) -> None:
@@ -157,6 +158,13 @@ def print_multitone_image(
         gray = ImageEnhance.Sharpness(gray).enhance(sharpness)
     if contrast and contrast > 0 and abs(float(contrast) - 1.0) > 1e-3:
         gray = ImageEnhance.Contrast(gray).enhance(contrast)
+
+    clip_val = max(0, min(255, int(white_clip)))
+    if clip_val < 255:
+        # Preserve paper white by forcing near-highlight pixels to no-ink.
+        arr = np.asarray(gray, dtype=np.uint8).copy()
+        arr[arr >= clip_val] = 255
+        gray = Image.fromarray(arr, mode="L")
 
     codes = _dither_to_levels(
         gray=gray,

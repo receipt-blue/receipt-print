@@ -161,6 +161,7 @@ class ImageProcessingConfig:
     gamma: List[float] = field(default_factory=lambda: [1.0])
     autocontrast: bool = False
     multitone: bool = False
+    multitone_white_clip: int = 248
     captions_str: Optional[str] = None
     footer_text: Optional[str] = None
     debug: bool = False
@@ -209,6 +210,7 @@ IMAGE_OPTION_FALLBACK_DEFAULTS: Dict[str, Any] = {
     "gamma": "1.0",
     "autocontrast": None,
     "multitone": False,
+    "multitone_white_clip": 248,
 }
 
 
@@ -409,6 +411,15 @@ sugar_image_options = [
         group=IMAGE_TUNING_GROUP,
     ),
     click.option(
+        "--multitone-white-clip",
+        type=click.IntRange(0, 255),
+        default=248,
+        show_default=True,
+        help="When --multitone is enabled, luminance >= this value is forced to paper white.",
+        cls=GroupedOption,
+        group=IMAGE_TUNING_GROUP,
+    ),
+    click.option(
         "--scale",
         default="1.0",
         help="Comma-separated floats for per-image scale.",
@@ -476,6 +487,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     autocontrast_val = kwargs.get("autocontrast", None)
     autocontrast = bool(autocontrast_val) if autocontrast_val not in (None, "") else False
     multitone = bool(kwargs.get("multitone", False))
+    multitone_white_clip = int(kwargs.get("multitone_white_clip", 248))
 
     if not brightness:
         brightness = [1.0]
@@ -515,6 +527,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         gamma=gamma_vals,
         autocontrast=autocontrast,
         multitone=multitone,
+        multitone_white_clip=multitone_white_clip,
         ts_fmt=ts_fmt,
         captions_str=kwargs["caption"],
         footer_text=kwargs["footer"],
@@ -907,6 +920,7 @@ def print_with_images(
         spacing=config.spacing,
         names=names,
         multitone=config.multitone,
+        multitone_white_clip=config.multitone_white_clip,
         wrap_mode=config.wrap_mode,
         no_cut=no_cut,
     )
@@ -1934,13 +1948,15 @@ def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
             return False
         return kwargs.get(param_name, sentinel) != default_val
 
-    for key, value in PDF_IMAGE_TUNING_DEFAULTS.items():
-        if key == "autocontrast":
+    multitone_enabled = bool(kwargs.get("multitone", False))
+    if not multitone_enabled:
+        for key, value in PDF_IMAGE_TUNING_DEFAULTS.items():
+            if key == "autocontrast":
+                if not user_supplied(key):
+                    kwargs[key] = bool(value)
+                continue
             if not user_supplied(key):
-                kwargs[key] = bool(value)
-            continue
-        if not user_supplied(key):
-            kwargs[key] = value
+                kwargs[key] = value
 
     kwargs["wrap"] = wrap_mode
     config = create_image_config(**kwargs)
