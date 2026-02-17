@@ -33,6 +33,8 @@ HEADING_SIZES = {1: 48, 2: 40, 3: 32, 4: 28, 5: 24, 6: 22}
 CODE_FONT_SIZE = 20
 TABLE_FONT_SIZE = 20
 MIN_COLUMN_WIDTH = 60
+DEFAULT_LINE_HEIGHT_MULT = 1.2
+NESTED_LIST_BREAK_HEIGHT = 10
 
 
 def get_cache_dir() -> Path:
@@ -120,7 +122,7 @@ class TextStyle:
     font_size: int = DEFAULT_FONT_SIZE
     bold: bool = False
     italic: bool = False
-    line_height_mult: float = 1.3
+    line_height_mult: float = DEFAULT_LINE_HEIGHT_MULT
 
 
 def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
@@ -438,6 +440,16 @@ def render_list_item(
     return img
 
 
+def render_spacer(height: int, max_width: int = PRINTER_WIDTH, kind: str = "spacer") -> Image.Image:
+    img = Image.new("L", (round_up_to_8(max_width), max(1, height)), 255)
+    img.info["spacer_kind"] = kind
+    return img
+
+
+def is_spacer(img: Image.Image) -> bool:
+    return bool(img.info.get("spacer_kind"))
+
+
 @dataclass
 class MarkdownToken:
     type: str
@@ -448,6 +460,7 @@ class MarkdownToken:
     headers: List[str] = field(default_factory=list)
     ordered: bool = False
     spans: List[StyledSpan] = field(default_factory=list)
+    task_state: Optional[str] = None
 
 
 def parse_inline_formatting(text: str) -> Tuple[str, List[StyledSpan]]:
@@ -500,6 +513,23 @@ def parse_inline_formatting(text: str) -> Tuple[str, List[StyledSpan]]:
             offset += marker_len
 
     return result, spans
+
+
+def parse_task_marker(content: str) -> Tuple[Optional[str], str]:
+    task_match = re.match(r"^\[([ xX/])\](?:\s+(.*)|\s*$)", content)
+    if not task_match:
+        return None, content
+
+    marker = task_match.group(1)
+    stripped_content = task_match.group(2) or ""
+
+    if marker == " ":
+        return "unchecked", stripped_content
+    if marker in {"x", "X"}:
+        return "checked", stripped_content
+    if marker == "/":
+        return "partial", stripped_content
+    return None, content
 
 
 def parse_markdown(text: str) -> List[MarkdownToken]:
@@ -567,8 +597,17 @@ def parse_markdown(text: str) -> List[MarkdownToken]:
                 item_match = re.match(r"^(\s*)[-*+]\s+(.+)$", lines[i])
                 if item_match:
                     item_indent = len(item_match.group(1)) // 2
-                    content, spans = parse_inline_formatting(item_match.group(2))
-                    list_items.append(MarkdownToken(type="list_item", content=content, level=item_indent, spans=spans))
+                    task_state, raw_content = parse_task_marker(item_match.group(2))
+                    content, spans = parse_inline_formatting(raw_content)
+                    list_items.append(
+                        MarkdownToken(
+                            type="list_item",
+                            content=content,
+                            level=item_indent,
+                            spans=spans,
+                            task_state=task_state,
+                        )
+                    )
                     i += 1
                 elif lines[i].strip() == "":
                     i += 1
@@ -587,9 +626,16 @@ def parse_markdown(text: str) -> List[MarkdownToken]:
                 item_match = re.match(r"^(\s*)(\d+)\.\s+(.+)$", lines[i])
                 if item_match:
                     item_indent = len(item_match.group(1)) // 2
-                    content, spans = parse_inline_formatting(item_match.group(3))
+                    task_state, raw_content = parse_task_marker(item_match.group(3))
+                    content, spans = parse_inline_formatting(raw_content)
                     list_items.append(
-                        MarkdownToken(type="list_item", content=content, level=item_indent, spans=spans)
+                        MarkdownToken(
+                            type="list_item",
+                            content=content,
+                            level=item_indent,
+                            spans=spans,
+                            task_state=task_state,
+                        )
                     )
                     item_num += 1
                     i += 1
@@ -627,7 +673,7 @@ def render_markdown(markdown_text: str, max_width: int = PRINTER_WIDTH) -> List[
     tokens = parse_markdown(markdown_text)
     images = []
 
-    for token in tokens:
+    for token_idx, token in enumerate(tokens):
         if token.type == "heading":
             font_size = HEADING_SIZES.get(token.level, DEFAULT_FONT_SIZE)
             style = TextStyle(font_size=font_size, bold=True)
@@ -658,12 +704,29 @@ def render_markdown(markdown_text: str, max_width: int = PRINTER_WIDTH) -> List[
 
         elif token.type == "list":
             for idx, item in enumerate(token.children):
-                if token.ordered:
+                if item.task_state == "unchecked":
+                    bullet = "☐"
+                elif item.task_state == "checked":
+                    bullet = "☑"
+                elif item.task_state == "partial":
+                    bullet = "▣"
+                elif token.ordered:
                     bullet = f"{idx + 1}."
                 else:
                     bullet = "•"
                 img = render_list_item(item.content, bullet, item.level, max_width)
                 images.append(img)
+
+            next_token = tokens[token_idx + 1] if token_idx + 1 < len(tokens) else None
+            has_nested_items = any(item.level > 0 for item in token.children)
+            if next_token and next_token.type == "list" and has_nested_items:
+                images.append(
+                    render_spacer(
+                        NESTED_LIST_BREAK_HEIGHT,
+                        max_width=max_width,
+                        kind="list_break",
+                    )
+                )
 
     return images
 
@@ -679,14 +742,24 @@ def render_markdown_to_single_image(
         img = Image.new("L", (round_up_to_8(max_width), 8), 255)
         return img
 
-    total_height = sum(img.height for img in block_images) + spacing * (len(block_images) - 1)
+    total_height = sum(img.height for img in block_images)
+    for idx in range(len(block_images) - 1):
+        current = block_images[idx]
+        next_img = block_images[idx + 1]
+        if is_spacer(current) or is_spacer(next_img):
+            continue
+        total_height += spacing
     total_height = round_up_to_8(total_height)
 
     combined = Image.new("L", (round_up_to_8(max_width), total_height), 255)
 
     y = 0
-    for img in block_images:
+    for idx, img in enumerate(block_images):
         combined.paste(img, (0, y))
-        y += img.height + spacing
+        y += img.height
+        if idx < len(block_images) - 1:
+            next_img = block_images[idx + 1]
+            if not is_spacer(img) and not is_spacer(next_img):
+                y += spacing
 
     return combined

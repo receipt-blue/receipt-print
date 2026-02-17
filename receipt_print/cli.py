@@ -1079,6 +1079,41 @@ def print_with_images(
     printer.close()
 
 
+def render_markdown_image(markdown_text: str, spacing: int, scale: float) -> Image.Image:
+    from .markdown_render import PRINTER_WIDTH, render_markdown_to_single_image
+
+    if abs(scale - 1.0) < 1e-9:
+        return render_markdown_to_single_image(markdown_text, spacing=spacing)
+
+    if scale > 1.0:
+        base_width = max(8, (int(PRINTER_WIDTH / scale) // 8) * 8)
+    else:
+        base_width = PRINTER_WIDTH
+
+    img = render_markdown_to_single_image(
+        markdown_text,
+        max_width=base_width,
+        spacing=spacing,
+    )
+
+    img = img.resize(
+        (
+            max(1, int(round(img.width * scale))),
+            max(1, int(round(img.height * scale))),
+        ),
+        Image.Resampling.NEAREST,
+    )
+
+    if img.width < PRINTER_WIDTH:
+        padded = Image.new("L", (PRINTER_WIDTH, img.height), 255)
+        padded.paste(img, (0, 0))
+        img = padded
+    elif img.width > PRINTER_WIDTH:
+        img = img.crop((0, 0, PRINTER_WIDTH, img.height))
+
+    return img
+
+
 @click.group(cls=GroupedGroup, invoke_without_command=True)
 @add_wrap_option
 @add_no_cut_option
@@ -1224,6 +1259,15 @@ def shell(ctx, commands, no_wrap, wrap, no_cut):
     group=IMAGE_LAYOUT_GROUP,
 )
 @click.option(
+    "--scale",
+    type=click.FloatRange(min=0, min_open=True),
+    default=1.0,
+    show_default=True,
+    help="Markdown scale multiplier (>0).",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
     "--dither",
     help="Dithering algorithm: none, thresh, floyd, atkinson.",
     cls=GroupedOption,
@@ -1245,7 +1289,7 @@ def shell(ctx, commands, no_wrap, wrap, no_cut):
 )
 @add_no_cut_option
 @click.pass_context
-def md(ctx, files, spacing, dither, threshold, diffusion, no_cut):
+def md(ctx, files, spacing, scale, dither, threshold, diffusion, no_cut):
     """Print markdown rendered as images.
 
     Renders markdown to rasterized images for the thermal printer.
@@ -1253,8 +1297,6 @@ def md(ctx, files, spacing, dither, threshold, diffusion, no_cut):
     blockquotes, and horizontal rules.
     """
     from .image_utils import apply_dither
-    from .markdown_render import render_markdown_to_single_image
-
     effective_no_cut = resolve_no_cut(ctx, no_cut)
 
     if files:
@@ -1276,7 +1318,7 @@ def md(ctx, files, spacing, dither, threshold, diffusion, no_cut):
         click.echo("Empty markdown input.", err=True)
         sys.exit(1)
 
-    img = render_markdown_to_single_image(markdown_text, spacing=spacing)
+    img = render_markdown_image(markdown_text, spacing=spacing, scale=scale)
 
     img = img.convert("RGB")
 
