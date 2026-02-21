@@ -35,6 +35,7 @@ receipt-print image img1.png img2.png
 receipt-print image https://example.com/photo.jpg
 cat image_paths.txt | receipt-print image
 pbpaste | receipt-print image  # clipboard file or path
+receipt-print image --tile 5 mural.png  # print a set of sequential vertical segments
 ```
 
 Print PDFs:

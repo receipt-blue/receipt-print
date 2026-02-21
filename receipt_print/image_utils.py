@@ -99,6 +99,46 @@ def _apply_edge_pad_compensation(
     return canvas, True
 
 
+def _tile_image_for_receipts(
+    image: Image.Image,
+    max_width: int,
+    tile_count: int,
+    left_pad: float,
+    right_pad: float,
+) -> List[Image.Image]:
+    if tile_count <= 1:
+        return [image]
+
+    total_pad = left_pad + right_pad
+    content_width = max(1, int(math.floor(max_width * (1.0 - total_pad))))
+    target_width = max(1, content_width * tile_count)
+
+    if image.width != target_width:
+        ratio = target_width / max(1, image.width)
+        target_height = max(1, int(round(image.height * ratio)))
+        working = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+    else:
+        working = image.copy()
+
+    use_canvas = left_pad > 0.0 or right_pad > 0.0
+    left_offset = int(math.floor(max_width * left_pad))
+    max_offset = max(0, max_width - content_width)
+    paste_x = min(left_offset, max_offset)
+
+    strips: List[Image.Image] = []
+    for part_idx in range(tile_count):
+        x0 = part_idx * content_width
+        x1 = x0 + content_width
+        strip = working.crop((x0, 0, x1, working.height))
+        if use_canvas:
+            canvas = Image.new("RGB", (max_width, strip.height), "white")
+            canvas.paste(strip.convert("RGB"), (paste_x, 0))
+            strips.append(canvas)
+        else:
+            strips.append(strip)
+    return strips
+
+
 def _apply_gamma(image: Image.Image, gamma: float) -> Image.Image:
     if math.isclose(gamma, 1.0, rel_tol=1e-3):
         return image
@@ -178,6 +218,7 @@ def print_images_from_pil(
     footer_text: Optional[str] = None,
     debug: bool = False,
     spacing: int = 1,
+    tile: int = 1,
     left_pad: float = 0.0,
     right_pad: float = 0.0,
     names: Optional[Iterable[str]] = None,
@@ -200,8 +241,13 @@ def print_images_from_pil(
     else:
         parsed_captions_list = parse_caption_csv(captions_str)
 
-    if cut_between:
+    tile_mode = tile > 1
+    if cut_between or tile_mode:
         parsed_captions_list = []
+    if tile_mode:
+        footer_text = None
+        spacing = 0
+        cut_between = True
 
     img_list = list(images)
     name_list = (
@@ -243,6 +289,9 @@ def print_images_from_pil(
     for idx, img in enumerate(img_list):
         scale = float(get(scale_list, idx))
         al = get(align_list, idx).lower()
+        if tile_mode:
+            scale = 1.0
+            al = "left"
         orient = (
             "landscape"
             if auto_orient and img.width > img.height
@@ -253,14 +302,14 @@ def print_images_from_pil(
         if orient == "landscape":
             im = im.rotate(270, expand=True)
 
-        if im.width > max_width:
+        if not tile_mode and im.width > max_width:
             ratio = max_width / im.width
             im = im.resize(
                 (int(im.width * ratio), int(im.height * ratio)),
                 Image.Resampling.LANCZOS,
             )
 
-        if not math.isclose(scale, 1.0, rel_tol=1e-5):
+        if not tile_mode and not math.isclose(scale, 1.0, rel_tol=1e-5):
             im = im.resize(
                 (int(im.width * scale), int(im.height * scale)),
                 Image.Resampling.LANCZOS,
@@ -279,29 +328,55 @@ def print_images_from_pil(
             im = preprocess_image(
                 im, brightness_val, contrast_val, gamma_val, autocontrast
             )
-        im, edge_pad_applied = _apply_edge_pad_compensation(
-            im,
-            max_width=max_width,
-            left_pad=left_pad,
-            right_pad=right_pad,
-            align=al,
-        )
-
-        total_lines += math.ceil(im.height / DOTS_PER_LINE)
-        processed.append(
-            (
+        if tile_mode:
+            strips = _tile_image_for_receipts(
                 im,
-                al,
-                idx,
-                name_list[idx],
-                scale,
-                orient,
-                brightness_val,
-                contrast_val,
-                gamma_val,
-                edge_pad_applied,
+                max_width=max_width,
+                tile_count=tile,
+                left_pad=left_pad,
+                right_pad=right_pad,
             )
-        )
+            edge_pad_applied = left_pad > 0.0 or right_pad > 0.0
+            for part_idx, strip in enumerate(strips, start=1):
+                total_lines += math.ceil(strip.height / DOTS_PER_LINE)
+                processed.append(
+                    (
+                        strip,
+                        al,
+                        idx,
+                        f"{name_list[idx]}#part{part_idx}",
+                        scale,
+                        orient,
+                        brightness_val,
+                        contrast_val,
+                        gamma_val,
+                        edge_pad_applied,
+                    )
+                )
+        else:
+            im, edge_pad_applied = _apply_edge_pad_compensation(
+                im,
+                max_width=max_width,
+                left_pad=left_pad,
+                right_pad=right_pad,
+                align=al,
+            )
+
+            total_lines += math.ceil(im.height / DOTS_PER_LINE)
+            processed.append(
+                (
+                    im,
+                    al,
+                    idx,
+                    name_list[idx],
+                    scale,
+                    orient,
+                    brightness_val,
+                    contrast_val,
+                    gamma_val,
+                    edge_pad_applied,
+                )
+            )
 
     if total_lines > MAX_LINES:
         try:
@@ -333,7 +408,10 @@ def print_images_from_pil(
         dith = get(dither_list, idx)
         thresh = float(get(threshold_list, idx))
         diff = float(get(diffusion_list, idx))
-        esc_align, center = apply_alignment(al, orient)
+        if tile_mode:
+            esc_align, center = ("left", False)
+        else:
+            esc_align, center = apply_alignment(al, orient)
 
         if debug:
             printer.set(align="left")
@@ -431,6 +509,7 @@ def print_images(
     footer_text: Optional[str] = None,
     debug: bool = False,
     spacing: int = 1,
+    tile: int = 1,
     left_pad: float = 0.0,
     right_pad: float = 0.0,
     brightness_list: Optional[List[float]] = None,
@@ -472,6 +551,7 @@ def print_images(
         footer_text=footer_text,
         debug=debug,
         spacing=spacing,
+        tile=tile,
         left_pad=left_pad,
         right_pad=right_pad,
         names=names,

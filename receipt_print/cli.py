@@ -169,6 +169,7 @@ class ImageProcessingConfig:
     footer_text: Optional[str] = None
     debug: bool = False
     spacing: int = 1
+    tile: int = 1
     left_pad: float = 0.0
     right_pad: float = 0.0
     wrap_mode: str = "hyphen"
@@ -300,6 +301,17 @@ def resolve_wrap(ctx: Optional[click.Context], wrap: Optional[str]) -> str:
             return parent.params["wrap"]
         parent = parent.parent
     return "hyphen"
+
+
+def option_supplied_on_command_line(
+    ctx: Optional[click.Context], option_name: str
+) -> bool:
+    if not ctx:
+        return False
+    try:
+        return ctx.get_parameter_source(option_name) == ParameterSource.COMMANDLINE
+    except Exception:
+        return False
 
 
 def validate_method(value):
@@ -600,6 +612,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
     multitone = bool(kwargs.get("multitone", False))
     multitone_white_clip = int(kwargs.get("multitone_white_clip", 248))
     multitone_diffusion = float(kwargs.get("multitone_diffusion", 1.0))
+    tile = int(kwargs.get("tile", 1))
     left_pad = resolve_edge_pad(kwargs.get("left_pad"), "left-pad", LEFT_PAD_ENV)
     right_pad = resolve_edge_pad(kwargs.get("right_pad"), "right-pad", RIGHT_PAD_ENV)
     if multitone_diffusion < 0:
@@ -650,6 +663,7 @@ def create_image_config(**kwargs) -> ImageProcessingConfig:
         footer_text=kwargs["footer"],
         debug=kwargs["debug"],
         spacing=kwargs["spacing"],
+        tile=tile,
         left_pad=left_pad,
         right_pad=right_pad,
         wrap_mode=wrap_mode,
@@ -1065,6 +1079,7 @@ def print_with_images(
         footer_text=config.footer_text,
         debug=config.debug,
         spacing=config.spacing,
+        tile=config.tile,
         left_pad=config.left_pad,
         right_pad=config.right_pad,
         names=names,
@@ -1075,7 +1090,8 @@ def print_with_images(
         no_cut=no_cut,
     )
 
-    maybe_cut(printer, no_cut=no_cut)
+    if config.tile <= 1:
+        maybe_cut(printer, no_cut=no_cut)
     printer.close()
 
 
@@ -1333,14 +1349,52 @@ def md(ctx, files, spacing, scale, dither, threshold, diffusion, no_cut):
     printer.close()
 
 
+def validate_tile_mode_options(
+    ctx: click.Context, tile: int, no_cut: bool, kwargs: Dict[str, Any]
+) -> None:
+    if tile <= 1:
+        return
+
+    if env_no_cut():
+        raise click.UsageError("RP_NO_CUT=1 disables cutting; --tile is incompatible.")
+
+    if resolve_no_cut(ctx, no_cut):
+        raise click.UsageError("--no-cut is mutually exclusive with --tile.")
+
+    if option_supplied_on_command_line(ctx, "align"):
+        raise click.UsageError("--align is mutually exclusive with --tile.")
+    if option_supplied_on_command_line(ctx, "scale"):
+        raise click.UsageError("--scale is mutually exclusive with --tile.")
+    if kwargs.get("heading"):
+        raise click.UsageError("--heading is mutually exclusive with --tile.")
+    if kwargs.get("caption"):
+        raise click.UsageError("--caption is mutually exclusive with --tile.")
+    if kwargs.get("footer"):
+        raise click.UsageError("--footer is mutually exclusive with --tile.")
+
+
 @cli.command()
 @click.argument("files", nargs=-1)
 @add_image_options
+@click.option(
+    "--tile",
+    type=click.IntRange(1, 12),
+    default=1,
+    show_default=True,
+    help=(
+        "Tile each image into N horizontal strips and print on separate receipts. "
+        "Incompatible with --align, --scale, --heading, --caption, --footer, and --no-cut."
+    ),
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
 @add_wrap_option
 @add_no_cut_option
 @click.pass_context
 def image(ctx, files, no_cut, **kwargs):
     """Print one or more images."""
+    validate_tile_mode_options(ctx, int(kwargs.get("tile", 1)), no_cut, kwargs)
+
     img_bytes = None
     if not files:
         if not sys.stdin.isatty():
