@@ -959,10 +959,14 @@ def print_arena_block(
     images_only: bool = False,
     cut_between: bool = False,
     added_override: Optional[datetime] = None,
+    block_caption: str = "none",
 ) -> bool:
     """Print a single block following the Are.na spec."""
 
     content_printed = False
+    block_url = canonical_block_url(block_id)
+    manual_cut_after_block = False
+    block_caption_mode = block_caption != "none"
     title = block_title(block)
     title_clean = collapse_spaces(title.encode("ascii", "ignore").decode("ascii"))
 
@@ -972,7 +976,17 @@ def print_arena_block(
     images, image_names = gather_images_for_block(block, client, media_opts)
 
     if images:
-        job.print_images(images, names=image_names)
+        if block_caption_mode and cut_between and job.cut_between_images:
+            previous_cut_between = job.cut_between_images
+            job.cut_between_images = False
+            try:
+                job.print_images(images, names=image_names, captions=None)
+            finally:
+                job.cut_between_images = previous_cut_between
+            manual_cut_after_block = True
+        else:
+            image_captions = None
+            job.print_images(images, names=image_names, captions=image_captions)
         content_printed = True
     elif images_only:
         return False
@@ -991,10 +1005,23 @@ def print_arena_block(
 
     if not content_printed:
         preview_urls = block_preview_urls(block)
-        fallback = preview_urls[0] if preview_urls else canonical_block_url(block_id)
+        fallback = preview_urls[0] if preview_urls else block_url
         fallback = collapse_spaces(fallback.encode("ascii", "ignore").decode("ascii"))
         job.print_text(fallback, align="left", font="a")
         content_printed = True
+
+    if block_caption_mode and content_printed:
+        if images:
+            job.line_break(1)
+        if block_caption == "url":
+            job.print_text(block_url, align="center", font="b", bold=True)
+        elif block_caption == "qr":
+            job.printer.set(align="right", font="a")
+            try:
+                job.printer.qr(block_url, size=qr_cfg.size, ec=qr_cfg.ec)
+            except Exception as exc:
+                sys.stderr.write(f"Warning: Failed to print QR for {block_url}: {exc}\n")
+            job.printer.set(align="left", font="a")
 
     if not clean and not images_only:
         if title_clean:
@@ -1014,14 +1041,17 @@ def print_arena_block(
             job.print_text(collapse_spaces(meta), align="right", font="a")
 
     if qr_cfg.enabled and not images_only:
-        url = canonical_block_url(block_id)
         job.printer.set(align="right")
         try:
-            job.printer.qr(url, size=qr_cfg.size, ec=qr_cfg.ec)
+            job.printer.qr(block_url, size=qr_cfg.size, ec=qr_cfg.ec)
         except Exception as exc:
-            sys.stderr.write(f"Warning: Failed to print QR for {url}: {exc}\n")
+            sys.stderr.write(f"Warning: Failed to print QR for {block_url}: {exc}\n")
 
-    if not cut_between:
+    if manual_cut_after_block:
+        if not job.no_cut:
+            job.printer.cut()
+        job.printer.set(align="left")
+    elif not cut_between:
         job.line_break(1 if qr_cfg.enabled else 2)
     return content_printed
 
@@ -1498,6 +1528,15 @@ def arena_group():
     group=IMAGE_LAYOUT_GROUP,
 )
 @click.option(
+    "--block-caption",
+    type=click.Choice(["none", "url", "qr"]),
+    default="none",
+    show_default=True,
+    help="Per-block caption style: none, url, or qr.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
     "--footer",
     help="Footer text printed after all output.",
     cls=GroupedOption,
@@ -1587,6 +1626,7 @@ def arena_block(
     spacing,
     heading,
     caption,
+    block_caption,
     footer,
     clean,
     brightness,
@@ -1609,6 +1649,8 @@ def arena_block(
     no_cut,
 ):
     """Print one or more Are.na blocks."""
+    if caption and block_caption != "none":
+        raise click.UsageError("--caption is mutually exclusive with --block-caption.")
     effective_no_cut = resolve_no_cut(ctx, no_cut)
     media_opts, missing_ffmpeg = build_media_options(
         video, ffmpeg, pdf, pdf_pages, pdf_range
@@ -1707,6 +1749,7 @@ def arena_block(
                 media_opts,
                 qr_cfg,
                 clean=clean,
+                block_caption=block_caption,
             )
             if success:
                 printed_any = True
@@ -1734,6 +1777,15 @@ def arena_block(
 @click.option(
     "--caption",
     help="Comma-separated list of per-image captions.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--block-caption",
+    type=click.Choice(["none", "url", "qr"]),
+    default="none",
+    show_default=True,
+    help="Per-block caption style: none, url, or qr.",
     cls=GroupedOption,
     group=IMAGE_LAYOUT_GROUP,
 )
@@ -1874,6 +1926,7 @@ def arena_channel(
     spacing,
     heading,
     caption,
+    block_caption,
     footer,
     clean,
     brightness,
@@ -1903,6 +1956,8 @@ def arena_channel(
     no_cut,
 ):
     """Print all blocks in an Are.na channel."""
+    if caption and block_caption != "none":
+        raise click.UsageError("--caption is mutually exclusive with --block-caption.")
     if cut_between and env_no_cut():
         raise click.UsageError(
             "RP_NO_CUT=1 disables cutting; --cut-between is incompatible."
@@ -2070,6 +2125,7 @@ def arena_channel(
                 images_only=cut_mode,
                 cut_between=cut_mode,
                 added_override=added_dt,
+                block_caption=block_caption,
             )
             if success:
                 printed_blocks += 1

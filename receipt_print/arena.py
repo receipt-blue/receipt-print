@@ -611,12 +611,17 @@ class ArenaPrintJob:
         )
 
     def print_images(
-        self, images: Iterable[Image.Image], names: Optional[Iterable[str]] = None
+        self,
+        images: Iterable[Image.Image],
+        names: Optional[Iterable[str]] = None,
+        captions: Optional[List[str]] = None,
     ) -> None:
         img_list = list(images)
         if not img_list:
             return
-        self.caption_index = print_images_from_pil(
+        caption_list = captions if captions is not None else self.captions
+        caption_start = 0 if captions is not None else self.caption_index
+        next_caption_index = print_images_from_pil(
             self.printer,
             img_list,
             self.scales,
@@ -630,8 +635,8 @@ class ArenaPrintJob:
             contrast_list=self.contrast,
             gamma_list=self.gamma,
             autocontrast=self.autocontrast,
-            captions_list=self.captions,
-            caption_start=self.caption_index,
+            captions_list=caption_list,
+            caption_start=caption_start,
             footer_text=None,
             debug=self.debug,
             spacing=0 if self.cut_between_images else self.spacing,
@@ -643,6 +648,8 @@ class ArenaPrintJob:
             cut_between=self.cut_between_images,
             no_cut=self.no_cut,
         )
+        if captions is None:
+            self.caption_index = next_caption_index
 
     def line_break(self, count: int = 1) -> None:
         if count > 0:
