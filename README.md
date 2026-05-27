@@ -73,6 +73,14 @@ pbpaste | receipt-print pdf  # or paste from `wl-paste` / `xclip -selection clip
 receipt-print pdf --format text document.pdf
 ```
 
+Print Wi-Fi QR sheets:
+```bash
+receipt-print wifi  # choose a stored Wi-Fi profile (Linux only)
+receipt-print wifi --ssid "Sample Net" --password "example passphrase"
+receipt-print wifi --ssid "Sample Net" --password "example passphrase" --omit-password
+receipt-print wifi --ssid "Guest WiFi" --security nopass
+```
+
 Run command(s) and print captured output:
 ```bash
 receipt-print shell "ls -l" "git status"

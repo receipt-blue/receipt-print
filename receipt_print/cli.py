@@ -62,6 +62,13 @@ from .printer import (
     wrap_text,
 )
 from .shell import run_shell_commands
+from .wifi import (
+    WifiError,
+    WifiNetwork,
+    normalize_wifi_security,
+    print_wifi_card,
+    select_stored_wifi_network,
+)
 
 
 class GroupedOption(click.Option):
@@ -82,7 +89,18 @@ def _write_bold_section(
     formatter.dedent()
 
 
-PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell", "md", "qr", "raw"}
+PRINTING_COMMANDS = {
+    "image",
+    "pdf",
+    "are.na",
+    "text",
+    "cat",
+    "shell",
+    "md",
+    "qr",
+    "wifi",
+    "raw",
+}
 
 
 class GroupedCommand(click.Command):
@@ -372,6 +390,7 @@ VIDEO_GROUP = "video handling"
 PDF_GROUP = "PDF handling"
 ARENA_CONTENT_GROUP = "content filters"
 QR_GROUP = "QR codes"
+WIFI_GROUP = "Wi-Fi"
 NETWORK_GROUP = "cache, networking"
 LEFT_PAD_ENV = "RP_LEFT_PAD"
 RIGHT_PAD_ENV = "RP_RIGHT_PAD"
@@ -2302,6 +2321,131 @@ for param in pdf.params:
         if "--no-autocontrast" in param.opts:
             param.hidden = False
             param.help = "Skip the auto-contrast pre-pass; only --contrast multipliers are applied."
+
+
+@cli.command()
+@click.option(
+    "--ssid",
+    help="Wi-Fi network name. If omitted, choose from stored NetworkManager profiles.",
+    cls=GroupedOption,
+    group=WIFI_GROUP,
+)
+@click.option(
+    "--password",
+    help="Wi-Fi password. If omitted for secured manual networks, prompt interactively.",
+    cls=GroupedOption,
+    group=WIFI_GROUP,
+)
+@click.option(
+    "--security",
+    type=click.Choice(["WPA", "WEP", "nopass"], case_sensitive=False),
+    default=None,
+    help="Wi-Fi security for manual mode. Default: WPA.",
+    cls=GroupedOption,
+    group=WIFI_GROUP,
+)
+@click.option(
+    "--hidden",
+    is_flag=True,
+    help="Mark the network as hidden in the QR payload.",
+    cls=GroupedOption,
+    group=WIFI_GROUP,
+)
+@click.option(
+    "--omit-password",
+    is_flag=True,
+    help="Omit the password line from printed text.",
+    cls=GroupedOption,
+    group=WIFI_GROUP,
+)
+@click.option(
+    "--qr-size",
+    type=click.IntRange(min=1),
+    default=4,
+    show_default=True,
+    help="QR module size (printer dependent).",
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
+@click.option(
+    "--correction",
+    type=click.Choice(["L", "M", "Q", "H"]),
+    default="M",
+    help="Error correction level. Default: M.",
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
+@add_wrap_option
+@add_no_cut_option
+@click.pass_context
+def wifi(
+    ctx,
+    ssid,
+    password,
+    security,
+    hidden,
+    omit_password,
+    qr_size,
+    correction,
+    wrap,
+    no_cut,
+):
+    """Print a phone-scannable Wi-Fi QR code."""
+    if ssid is not None:
+        if not ssid:
+            raise click.UsageError("--ssid cannot be empty.")
+        try:
+            security_value = normalize_wifi_security(security or "WPA")
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        if security_value == "nopass":
+            if password:
+                raise click.UsageError(
+                    "--password cannot be used with --security nopass."
+                )
+            password_value = ""
+        else:
+            password_value = password
+            if password_value is None:
+                password_value = click.prompt(
+                    "Wi-Fi password", hide_input=True, err=True
+                )
+            if not password_value:
+                raise click.UsageError(
+                    "Wi-Fi password is required for secured networks."
+                )
+        network = WifiNetwork(
+            ssid=ssid,
+            password=password_value,
+            security=security_value,
+            hidden=hidden,
+        )
+    else:
+        if password is not None or security is not None or hidden:
+            raise click.UsageError(
+                "--password, --security, and --hidden require --ssid."
+            )
+        try:
+            network = select_stored_wifi_network()
+        except WifiError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    ec = QR_LEVELS.get(correction, QR_ECLEVEL_M)
+    printer = connect_printer()
+    try:
+        print_wifi_card(
+            printer,
+            network,
+            wrap_mode=resolve_wrap(ctx, wrap),
+            qr_size=qr_size,
+            ec=ec,
+            print_password=not omit_password,
+        )
+        maybe_cut(printer, no_cut=resolve_no_cut(ctx, no_cut))
+    except WifiError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        printer.close()
 
 
 @cli.command()
