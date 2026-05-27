@@ -261,6 +261,21 @@ def connect_printer():
     return p
 
 
+def print_raw_bytes(data: bytes, cut: bool = False) -> None:
+    printer = connect_printer()
+    try:
+        raw = getattr(printer, "_raw", None)
+        if not callable(raw):
+            raise RuntimeError("printer backend does not expose raw byte output")
+        raw(data)
+        if cut:
+            maybe_cut(printer)
+    finally:
+        close = getattr(printer, "close", None)
+        if callable(close):
+            close()
+
+
 def print_text(
     text: str,
     no_cut: bool = False,

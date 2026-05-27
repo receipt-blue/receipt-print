@@ -55,6 +55,7 @@ from .printer import (
     count_lines,
     env_no_cut,
     maybe_cut,
+    print_raw_bytes,
     print_text,
     sanitize_output,
     scaled_char_width,
@@ -81,7 +82,7 @@ def _write_bold_section(
     formatter.dedent()
 
 
-PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell", "md", "qr"}
+PRINTING_COMMANDS = {"image", "pdf", "are.na", "text", "cat", "shell", "md", "qr", "raw"}
 
 
 class GroupedCommand(click.Command):
@@ -2336,6 +2337,25 @@ def qr(ctx, data, size, correction, no_cut):
             sys.stderr.write(f"Error printing QR for {item}: {exc}\n")
     maybe_cut(printer, no_cut=effective_no_cut)
     printer.close()
+
+
+@cli.command()
+@click.argument("file", required=False, type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--cut",
+    is_flag=True,
+    help="Cut the paper after writing the raw bytes.",
+)
+def raw(file, cut):
+    """Write raw ESC/POS bytes."""
+    if file:
+        with open(file, "rb") as handle:
+            data = handle.read()
+    else:
+        data = sys.stdin.buffer.read()
+    if not data:
+        raise click.UsageError("no raw bytes supplied")
+    print_raw_bytes(data, cut=cut)
 
 
 @cli.group(cls=GroupedGroup)
