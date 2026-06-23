@@ -92,7 +92,10 @@ class PrintService:
             self._worker.join(timeout=join_grace)
             return
         self._stopping.set()
-        self._queue.put(None)
+        try:
+            self._queue.put(None, timeout=join_grace)
+        except queue.Full:
+            pass
         self._worker.join(timeout=join_grace)
 
     def submit(
@@ -164,8 +167,10 @@ def make_raw_handler(
 ) -> type[BaseHTTPRequestHandler]:
     """HTTP handler mapping a POSTed octet-stream body to a print_raw_bytes job.
 
-    Success => JSON {"ok": true, "bytes": n}. EVERY error => text/plain so that
-    receipt-wiki's receiptResponse surfaces the reason instead of an opaque status.
+    Success => JSON {"success": true, "bytes": n} (one-to-one with the kiosk's
+    /v1/print/raw shape so the two serve surfaces agree). EVERY error => text/plain
+    so that receipt-wiki's receiptResponse surfaces the reason instead of an opaque
+    status.
     """
 
     class RawHandler(BaseHTTPRequestHandler):
@@ -215,7 +220,7 @@ def make_raw_handler(
             except BaseException as exc:
                 self._text(502, f"{type(exc).__name__}: {exc}")
                 return
-            self._json(200, {"ok": True, "bytes": len(body)})
+            self._json(200, {"success": True, "bytes": len(body)})
 
         def log_message(self, fmt: str, *args: object) -> None:
             return

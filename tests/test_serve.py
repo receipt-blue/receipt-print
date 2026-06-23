@@ -98,7 +98,7 @@ def test_byte_passthrough_single_write(http_server, monkeypatch):
     status, ctype, data = _post(port, payload)
     assert status == 200
     assert ctype == "application/json"
-    assert json.loads(data) == {"ok": True, "bytes": len(payload)}
+    assert json.loads(data) == {"success": True, "bytes": len(payload)}
     assert seen["data"] == payload
     assert seen["cut"] is False
 
@@ -327,7 +327,7 @@ def test_http_systemexit_in_job_surfaces_then_recovers(monkeypatch):
         state["boom"] = False
         status2, ctype2, data2 = _post(port, b"world")
         assert status2 == 200
-        assert json.loads(data2) == {"ok": True, "bytes": 5}
+        assert json.loads(data2) == {"success": True, "bytes": 5}
     finally:
         server.shutdown()
         server.server_close()
@@ -357,7 +357,7 @@ def test_roundtrip_real_receipt_fixture(http_server):
     status, ctype, data = _post(port, sample)
     assert status == 200
     assert ctype == "application/json"
-    assert json.loads(data) == {"ok": True, "bytes": len(sample)}
+    assert json.loads(data) == {"success": True, "bytes": len(sample)}
     assert recorder["writes"] == [sample]
     assert len(recorder["writes"]) == 1
     assert recorder["cut_called"] is False
