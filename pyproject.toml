@@ -17,6 +17,15 @@ dependencies = [
     "requests>=2.32.3",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
 [project.urls]
 Homepage = "https://github.com/receipt-blue/receipt-print"
 

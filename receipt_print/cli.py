@@ -2502,6 +2502,31 @@ def raw(file, cut):
     print_raw_bytes(data, cut=cut)
 
 
+@cli.command()
+@click.option(
+    "--host",
+    default=lambda: os.getenv("RP_SERVE_HOST", "127.0.0.1"),
+    show_default="127.0.0.1",
+    cls=GroupedOption,
+    group=OUTPUT_GROUP,
+    help="Bind address for the raw-print HTTP server.",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=lambda: int(os.getenv("RP_SERVE_PORT", "9100")),
+    show_default="9100",
+    cls=GroupedOption,
+    group=OUTPUT_GROUP,
+    help="Bind port for the raw-print HTTP server.",
+)
+def serve(host, port):
+    """Serve raw ESC/POS bytes over HTTP (non-kiosk clients)."""
+    from receipt_print.serve import run_server
+
+    run_server(host=host, port=port)
+
+
 @cli.group(cls=GroupedGroup)
 def action():
     """Perform printer actions."""
