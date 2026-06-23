@@ -7,6 +7,14 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, ... }:
+    let
+      serveModule = import ./nix/modules/serve.nix { inherit self; };
+    in
+    {
+      nixosModules.receipt-print-serve = serveModule;
+      nixosModules.default = serveModule;
+    }
+    //
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
