@@ -182,8 +182,8 @@ def test_job_exception_reraised(service):
 def test_timeout_orphan_not_printed():
     svc = PrintService()
     svc.start()
+    release = threading.Event()
     try:
-        release = threading.Event()
         first_done = threading.Event()
         side_effects = []
 
@@ -219,8 +219,8 @@ def test_timeout_orphan_not_printed():
 def test_queue_full():
     svc = PrintService(queue_max=1)
     svc.start()
+    release = threading.Event()
     try:
-        release = threading.Event()
         started = threading.Event()
 
         def blocker():
