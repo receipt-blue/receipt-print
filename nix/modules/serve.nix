@@ -3,6 +3,18 @@
 
 let
   cfg = config.services.receipt-print-serve;
+  printerEnvironment = {
+    RP_HOST = "";
+    RP_VENDOR = cfg.vendor;
+    RP_PROFILE = cfg.profile;
+  }
+  // lib.optionalAttrs (cfg.device != null) {
+    RP_DEVICE = cfg.device;
+  }
+  // lib.optionalAttrs (cfg.product != null) {
+    RP_PRODUCT = cfg.product;
+  }
+  // cfg.environment;
   serveArgs = [
     "serve"
     "--host"
@@ -59,6 +71,38 @@ in
       description = "Primary group for the serve user; `lp` reaches the printer device node.";
     };
 
+    device = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "/dev/receipt-printer";
+      description = "Printer device path; set to null to use receipt-print's device discovery.";
+    };
+
+    vendor = lib.mkOption {
+      type = lib.types.str;
+      default = "04b8";
+      description = "USB vendor ID and default udev match for the printer.";
+    };
+
+    product = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional USB product ID passed to receipt-print.";
+    };
+
+    profile = lib.mkOption {
+      type = lib.types.str;
+      default = "TM-T20II";
+      description = "python-escpos printer profile passed to receipt-print.";
+    };
+
+    udev = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Install the USB printer permissions and receipt-printer symlink rule.";
+      };
+    };
+
     environment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
@@ -91,7 +135,25 @@ in
           USB/File path is used.
         '';
       }
+      {
+        assertion = !((config.services ? kiosk) && config.services.kiosk.enable);
+        message = ''
+          services.receipt-print-serve must stay disabled when services.kiosk.enable is true:
+          the kiosk owns the Pi printer and its embedded /v1/print/raw endpoint.
+        '';
+      }
     ];
+
+    users.groups.${cfg.group} = { };
+    users.users.${cfg.user} = {
+      isSystemUser = true;
+      group = cfg.group;
+    };
+
+    services.udev.extraRules = lib.mkIf cfg.udev.enable ''
+      SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="${cfg.vendor}", MODE="0660", GROUP="${cfg.group}", TAG+="uaccess"
+      SUBSYSTEM=="usbmisc", KERNEL=="lp[0-9]*", ATTRS{idVendor}=="${cfg.vendor}", MODE="0660", GROUP="${cfg.group}", TAG+="uaccess", SYMLINK+="receipt-printer"
+    '';
 
     networking.firewall.allowedTCPPorts =
       lib.mkIf cfg.openFirewall [ cfg.port ];
@@ -99,13 +161,15 @@ in
     systemd.services.receipt-print-serve = {
       description = "receipt-print raw ESC/POS HTTP serve (standalone)";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
-      environment = cfg.environment;
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      environment = printerEnvironment;
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} ${lib.escapeShellArgs serveArgs}";
         User = cfg.user;
         Group = cfg.group;
-        Restart = "always";
+        SupplementaryGroups = [ cfg.group ];
+        Restart = "on-failure";
         RestartSec = "3s";
         TimeoutStopSec = "15s";
       };

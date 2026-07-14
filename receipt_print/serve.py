@@ -1,17 +1,11 @@
-"""Shape-agnostic serialized print serving for receipt-print.
-
-`PrintService` runs OPAQUE printer jobs (zero-arg callables) one at a time on a
-single non-daemon worker thread; it never inspects or assumes what a job prints.
-The raw-bytes HTTP handler factory and the standalone ThreadingHTTPServer wrapper
-are the receipt-print-specific clients of that general executor; the kiosk reuses
-`PrintService` directly to serialize its own heterogeneous print paths.
-"""
+"""Serialized raw-print serving and the shared print executor."""
 
 from __future__ import annotations
 
 import json
 import os
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -20,13 +14,37 @@ from typing import Any, Callable, Optional
 
 from receipt_print.printer import print_raw_bytes
 
-MAX_BYTES = int(os.getenv("RP_SERVE_MAX_BYTES", str(8 * 1024 * 1024)))
-DEFAULT_QUEUE_MAX = int(os.getenv("RP_SERVE_QUEUE_MAX", "32"))
-DEFAULT_JOB_TIMEOUT = float(os.getenv("RP_SERVE_JOB_TIMEOUT", "30"))
-DEFAULT_ENQUEUE_TIMEOUT = float(os.getenv("RP_SERVE_ENQUEUE_TIMEOUT", "5"))
-DEFAULT_DRAIN_GRACE = float(os.getenv("RP_SERVE_DRAIN_GRACE", "10"))
 
-RAW_PATHS = ("/v1/print/raw", "/print/raw")
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive number") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return value
+
+
+MAX_BYTES = _positive_int_env("RP_SERVE_MAX_BYTES", 8 * 1024 * 1024)
+DEFAULT_QUEUE_MAX = _positive_int_env("RP_SERVE_QUEUE_MAX", 32)
+DEFAULT_JOB_TIMEOUT = _positive_float_env("RP_SERVE_JOB_TIMEOUT", 30)
+DEFAULT_ENQUEUE_TIMEOUT = _positive_float_env("RP_SERVE_ENQUEUE_TIMEOUT", 5)
+DEFAULT_DRAIN_GRACE = _positive_float_env("RP_SERVE_DRAIN_GRACE", 10)
+DEFAULT_REQUEST_TIMEOUT = _positive_float_env("RP_SERVE_REQUEST_TIMEOUT", 5)
+
+RAW_PATHS = ("/v1/print/raw",)
 
 
 class PrintQueueFull(Exception):
@@ -34,7 +52,7 @@ class PrintQueueFull(Exception):
 
 
 class PrintTimeout(Exception):
-    """Raised by submit() when a job does not finish within its timeout (job is abandoned)."""
+    """Raised by submit() when a job does not finish within its timeout."""
 
 
 class PrintServiceStopped(Exception):
@@ -47,17 +65,13 @@ class _Job:
     done: threading.Event = field(default_factory=threading.Event)
     result: Any = None
     error: Optional[BaseException] = None
-    abandoned: bool = False
+    state_lock: threading.Lock = field(default_factory=threading.Lock)
+    started: bool = False
+    cancelled: bool = False
 
 
 class PrintService:
-    """Serialize OPAQUE printer jobs onto one worker thread.
-
-    A job is any zero-arg callable. PrintService runs it, captures its return value
-    or BaseException, and never assumes what it prints. Connect-per-job lives inside
-    the job (e.g. print_raw_bytes does open->_raw->close). The single worker IS the
-    serialization (python-escpos is not thread-safe).
-    """
+    """Run zero-argument printer jobs serially on one worker thread."""
 
     def __init__(
         self,
@@ -65,6 +79,10 @@ class PrintService:
         queue_max: int = DEFAULT_QUEUE_MAX,
         drain_grace: float = DEFAULT_DRAIN_GRACE,
     ) -> None:
+        if queue_max < 1:
+            raise ValueError("queue_max must be positive")
+        if drain_grace <= 0:
+            raise ValueError("drain_grace must be positive")
         self._queue: "queue.Queue[Optional[_Job]]" = queue.Queue(maxsize=queue_max)
         self._drain_grace = drain_grace
         self._worker = threading.Thread(
@@ -73,30 +91,35 @@ class PrintService:
         self._started = False
         self._stopping = threading.Event()
         self._lock = threading.Lock()
+        self._sentinel_enqueued = False
         self._heartbeat = 0.0
-        self._alive = False
 
     def start(self) -> None:
         with self._lock:
             if self._started:
                 return
+            if self._stopping.is_set():
+                raise PrintServiceStopped("print service is stopping")
             self._started = True
         self._worker.start()
 
     def shutdown(self, *, grace: Optional[float] = None) -> None:
-        """Sentinel + join within grace so an in-flight job finishes; idempotent."""
+        """Stop accepting work and drain the worker for at most ``grace`` seconds."""
         if not self._started:
             return
         join_grace = grace if grace is not None else self._drain_grace
-        if self._stopping.is_set():
-            self._worker.join(timeout=join_grace)
-            return
+        if join_grace <= 0:
+            raise ValueError("grace must be positive")
+        deadline = time.monotonic() + join_grace
         self._stopping.set()
-        try:
-            self._queue.put(None, timeout=join_grace)
-        except queue.Full:
-            pass
-        self._worker.join(timeout=join_grace)
+        with self._lock:
+            enqueue_sentinel = not self._sentinel_enqueued
+            self._sentinel_enqueued = True
+        if enqueue_sentinel:
+            self._enqueue_sentinel(deadline)
+        if threading.current_thread() is not self._worker:
+            remaining = max(0.0, deadline - time.monotonic())
+            self._worker.join(timeout=remaining)
 
     def submit(
         self,
@@ -105,30 +128,42 @@ class PrintService:
         timeout: float = DEFAULT_JOB_TIMEOUT,
         enqueue_timeout: float = DEFAULT_ENQUEUE_TIMEOUT,
     ) -> Any:
-        """Enqueue an opaque job, block until it finishes, return fn()'s value.
-
-        Raises PrintServiceStopped if shut down, PrintQueueFull if the bounded queue
-        stays full past enqueue_timeout, PrintTimeout (and ABANDONS the job so it will
-        NOT print later) if it does not finish in `timeout`, or re-raises the job's own
-        BaseException (incl. SystemExit from connect_printer's sys.exit).
-        """
+        """Enqueue a job, wait for its result, and propagate its exception."""
         if self._stopping.is_set() or not self._started:
             raise PrintServiceStopped("print service is not accepting jobs")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if enqueue_timeout <= 0:
+            raise ValueError("enqueue_timeout must be positive")
         job = _Job(fn=fn)
-        try:
-            self._queue.put(job, timeout=enqueue_timeout)
-        except queue.Full as exc:
-            raise PrintQueueFull("print queue is full") from exc
+        deadline = time.monotonic() + enqueue_timeout
+        while True:
+            if self._stopping.is_set():
+                raise PrintServiceStopped("print service is not accepting jobs")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PrintQueueFull("print queue is full")
+            try:
+                self._queue.put(job, timeout=min(remaining, 0.1))
+                break
+            except queue.Full:
+                continue
         if not job.done.wait(timeout=timeout):
-            job.abandoned = True
+            with job.state_lock:
+                if not job.started:
+                    job.cancelled = True
             raise PrintTimeout(f"print job did not complete within {timeout}s")
         if job.error is not None:
             raise job.error
         return job.result
 
     def health(self) -> dict[str, Any]:
+        worker_alive = self._worker.is_alive()
+        ready = worker_alive and not self._stopping.is_set()
         return {
-            "worker_alive": self._worker.is_alive(),
+            "ok": ready,
+            "ready": ready,
+            "worker_alive": worker_alive,
             "queue": self._queue.qsize(),
             "heartbeat_age": (time.monotonic() - self._heartbeat)
             if self._heartbeat
@@ -136,27 +171,54 @@ class PrintService:
             "stopping": self._stopping.is_set(),
         }
 
+    def _cancel_queued_jobs(self) -> None:
+        while True:
+            try:
+                job = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            if job is not None:
+                with job.state_lock:
+                    if not job.started:
+                        job.cancelled = True
+                        job.error = PrintServiceStopped("print service stopped before the job ran")
+                        job.done.set()
+            self._queue.task_done()
+
+    def _enqueue_sentinel(self, deadline: float) -> None:
+        while True:
+            try:
+                self._queue.put_nowait(None)
+                return
+            except queue.Full:
+                if time.monotonic() >= deadline:
+                    self._cancel_queued_jobs()
+                    try:
+                        self._queue.put_nowait(None)
+                        return
+                    except queue.Full:
+                        continue
+                time.sleep(min(0.01, deadline - time.monotonic()))
+
     def _run(self) -> None:
-        self._alive = True
-        try:
-            while True:
-                self._heartbeat = time.monotonic()
-                job = self._queue.get()
-                if job is None:
-                    self._queue.task_done()
-                    return
-                if job.abandoned:
+        while True:
+            self._heartbeat = time.monotonic()
+            job = self._queue.get()
+            if job is None:
+                self._queue.task_done()
+                return
+            with job.state_lock:
+                if job.cancelled:
                     self._queue.task_done()
                     continue
-                try:
-                    job.result = job.fn()
-                except BaseException as exc:
-                    job.error = exc
-                finally:
-                    job.done.set()
-                    self._queue.task_done()
-        finally:
-            self._alive = False
+                job.started = True
+            try:
+                job.result = job.fn()
+            except BaseException as exc:
+                job.error = exc
+            finally:
+                job.done.set()
+                self._queue.task_done()
 
 
 def make_raw_handler(
@@ -164,17 +226,22 @@ def make_raw_handler(
     *,
     max_bytes: int = MAX_BYTES,
     job_timeout: float = DEFAULT_JOB_TIMEOUT,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> type[BaseHTTPRequestHandler]:
-    """HTTP handler mapping a POSTed octet-stream body to a print_raw_bytes job.
-
-    Success => JSON {"success": true, "bytes": n} (one-to-one with the kiosk's
-    /v1/print/raw shape so the two serve surfaces agree). EVERY error => text/plain
-    so that receipt-wiki's receiptResponse surfaces the reason instead of an opaque
-    status.
-    """
+    """Build the HTTP handler for the kiosk-compatible raw endpoint."""
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    if job_timeout <= 0:
+        raise ValueError("job_timeout must be positive")
+    if request_timeout <= 0:
+        raise ValueError("request_timeout must be positive")
 
     class RawHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
+
+        def setup(self) -> None:
+            super().setup()
+            self.connection.settimeout(request_timeout)
 
         def _text(self, status: int, message: str) -> None:
             body = message.encode("utf-8", "replace")
@@ -192,37 +259,87 @@ def make_raw_handler(
             self.end_headers()
             self.wfile.write(body)
 
+        def send_error(
+            self,
+            code: int,
+            message: Optional[str] = None,
+            explain: Optional[str] = None,
+        ) -> None:
+            del explain
+            default_message = self.responses.get(code, ("error",))[0]
+            self.close_connection = True
+            self._text(code, message or default_message)
+
         def do_GET(self) -> None:
-            if self.path.split("?", 1)[0] == "/healthz":
-                self._json(200, service.health())
+            self.close_connection = True
+            if self.path == "/healthz":
+                health = service.health()
+                self._json(200 if health["ready"] else 503, health)
                 return
             self._text(404, "not found")
 
         def do_POST(self) -> None:
-            if self.path.split("?", 1)[0] not in RAW_PATHS:
+            self.close_connection = True
+            if self.path not in RAW_PATHS:
                 self._text(404, "not found")
                 return
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            if length > max_bytes:
+            content_type = self.headers.get("Content-Type", "")
+            if content_type.split(";", 1)[0].strip().lower() != "application/octet-stream":
+                self._text(415, "content type must be application/octet-stream")
+                return
+            if self.headers.get("Transfer-Encoding"):
+                self._text(400, "transfer encoding is not supported")
+                return
+            lengths = self.headers.get_all("Content-Length") or []
+            if len(lengths) != 1:
+                self._text(400, "Content-Length is required")
+                return
+            raw_length = lengths[0].strip()
+            if not re.fullmatch(r"[0-9]+", raw_length, flags=re.ASCII):
+                self._text(400, "invalid Content-Length")
+                return
+            normalized_length = raw_length.lstrip("0") or "0"
+            max_length = str(max_bytes)
+            if len(normalized_length) > len(max_length) or (
+                len(normalized_length) == len(max_length)
+                and normalized_length > max_length
+            ):
                 self._text(413, f"body exceeds {max_bytes} bytes")
                 return
-            body = self.rfile.read(length) if length > 0 else b""
+            length = int(normalized_length)
+            if length == 0:
+                self._text(400, "empty body")
+                return
+            try:
+                body = self.rfile.read(length)
+            except TimeoutError:
+                self._text(408, "request body timed out")
+                return
+            except OSError:
+                self._text(400, "body read failed")
+                return
             if len(body) != length:
                 self._text(400, "short read")
-                return
-            if not body:
-                self._text(400, "empty body")
                 return
             try:
                 service.submit(
                     lambda: print_raw_bytes(body, cut=False), timeout=job_timeout
                 )
+            except PrintQueueFull as exc:
+                self._text(503, f"{type(exc).__name__}: {exc}")
+                return
+            except PrintServiceStopped as exc:
+                self._text(503, f"{type(exc).__name__}: {exc}")
+                return
+            except PrintTimeout as exc:
+                self._text(504, f"{type(exc).__name__}: {exc}")
+                return
             except BaseException as exc:
                 self._text(502, f"{type(exc).__name__}: {exc}")
                 return
             self._json(200, {"success": True, "bytes": len(body)})
 
-        def log_message(self, fmt: str, *args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             return
 
     return RawHandler
@@ -235,20 +352,29 @@ def make_server(
     service: Optional[PrintService] = None,
     max_bytes: int = MAX_BYTES,
     job_timeout: float = DEFAULT_JOB_TIMEOUT,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> tuple[ThreadingHTTPServer, PrintService]:
     """Build (but do not serve) a standalone raw-print server bound to host:port.
 
     Returns (server, service) so tests can bind 127.0.0.1:0 and tear down.
     """
     svc = service or PrintService()
-    svc.start()
-    handler = make_raw_handler(svc, max_bytes=max_bytes, job_timeout=job_timeout)
-    server = ThreadingHTTPServer((host, port), handler)
+    handler = make_raw_handler(
+        svc,
+        max_bytes=max_bytes,
+        job_timeout=job_timeout,
+        request_timeout=request_timeout,
+    )
+    server = _PrintHTTPServer((host, port), handler)
+    try:
+        svc.start()
+    except BaseException:
+        server.server_close()
+        raise
     return server, svc
 
 
 def _strip_speed_env() -> None:
-    """Structural guardrail 5: --speed must never inject GS ( K on the serve wire."""
     os.environ.pop("RP_SPEED_OVERRIDE", None)
     os.environ.pop("RP_SPEED", None)
 
@@ -259,18 +385,24 @@ def run_server(
     *,
     max_bytes: int = MAX_BYTES,
     job_timeout: float = DEFAULT_JOB_TIMEOUT,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> None:
-    """Standalone serve loop for NON-kiosk clients (Godot/API/dev).
-
-    Pops RP_SPEED_OVERRIDE/RP_SPEED structurally so --speed cannot inject GS ( K.
-    Leaves RP_HOST untouched so connect_printer() uses USB rather than silently
-    routing to a Network(host=...) that would hang.
-    """
+    """Run the standalone server for non-kiosk clients."""
     _strip_speed_env()
-    server, svc = make_server(host, port, max_bytes=max_bytes, job_timeout=job_timeout)
+    server, svc = make_server(
+        host,
+        port,
+        max_bytes=max_bytes,
+        job_timeout=job_timeout,
+        request_timeout=request_timeout,
+    )
     try:
         server.serve_forever()
     finally:
-        server.shutdown()
         server.server_close()
         svc.shutdown()
+
+
+class _PrintHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False

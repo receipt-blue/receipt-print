@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -32,7 +33,6 @@ def service():
 
 @pytest.fixture
 def http_server(monkeypatch):
-    """A real ThreadingHTTPServer bound to 127.0.0.1:0 with a recording printer."""
     recorder = {"writes": [], "cut_called": False, "closed": 0}
 
     class Recorder:
@@ -60,9 +60,15 @@ def http_server(monkeypatch):
         svc.shutdown()
 
 
-def _post(port, body, path="/v1/print/raw", content_length=None):
+def _post(
+    port,
+    body,
+    path="/v1/print/raw",
+    content_length=None,
+    content_type="application/octet-stream",
+):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    headers = {"Content-Type": "application/octet-stream"}
+    headers = {"Content-Type": content_type}
     if content_length is not None:
         headers["Content-Length"] = str(content_length)
     conn.request("POST", path, body=body, headers=headers)
@@ -83,6 +89,16 @@ def _get(port, path):
     data = resp.read()
     conn.close()
     return status, ctype, data
+
+
+def _read_until(client, marker):
+    response = b""
+    while marker not in response:
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        response += chunk
+    return response
 
 
 def test_byte_passthrough_single_write(http_server, monkeypatch):
@@ -256,11 +272,123 @@ def test_clean_shutdown_drains_inflight():
         svc.submit(lambda: None)
 
 
+def test_shutdown_deadline_cancels_queued_jobs():
+    svc = PrintService(queue_max=1, drain_grace=0.05)
+    svc.start()
+    release = threading.Event()
+    started = threading.Event()
+    result = {}
+
+    def blocker():
+        started.set()
+        release.wait(timeout=5)
+
+    def submit_queued():
+        try:
+            svc.submit(lambda: None, enqueue_timeout=5)
+        except BaseException as error:
+            result["error"] = error
+
+    try:
+        threading.Thread(target=lambda: svc.submit(blocker)).start()
+        assert started.wait(timeout=5)
+        queued = threading.Thread(target=submit_queued)
+        queued.start()
+        time.sleep(0.02)
+
+        began = time.monotonic()
+        svc.shutdown(grace=0.05)
+        elapsed = time.monotonic() - began
+
+        assert elapsed < 0.2
+        queued.join(timeout=1)
+        assert isinstance(result.get("error"), PrintServiceStopped)
+    finally:
+        release.set()
+        svc.shutdown(grace=1)
+
+
 def test_http_empty_body_is_text_plain(http_server):
     port, _ = http_server
     status, ctype, _ = _post(port, b"", content_length=0)
     assert status == 400
     assert ctype.startswith("text/plain")
+
+
+@pytest.mark.parametrize(
+    ("content_length", "expected_status"),
+    [("-1", 400), ("not-a-number", 400), ("9" * 5000, 413)],
+)
+def test_http_rejects_malformed_content_length(
+    http_server, content_length, expected_status
+):
+    port, recorder = http_server
+    status, ctype, _ = _post(port, b"hello", content_length=content_length)
+    assert status == expected_status
+    assert ctype.startswith("text/plain")
+    assert recorder["writes"] == []
+
+
+def test_http_rejects_wrong_content_type(http_server):
+    port, recorder = http_server
+    status, ctype, _ = _post(port, b"hello", content_type="text/plain")
+    assert status == 415
+    assert ctype.startswith("text/plain")
+    assert recorder["writes"] == []
+
+
+def test_http_stalled_body_times_out_and_tears_down(monkeypatch):
+    recorder = {"writes": []}
+
+    class Recorder:
+        def _raw(self, data):
+            recorder["writes"].append(data)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "receipt_print.printer.connect_printer", lambda: Recorder()
+    )
+    server, svc = make_server("127.0.0.1", 0, request_timeout=0.05)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=1)
+    client.sendall(
+        b"POST /v1/print/raw HTTP/1.0\r\n"
+        b"Content-Type: application/octet-stream\r\n"
+        b"Content-Length: 5\r\n\r\n"
+    )
+    try:
+        response = _read_until(client, b"request body timed out")
+        assert b"408 Request Timeout" in response
+        assert b"request body timed out" in response
+        assert recorder["writes"] == []
+    finally:
+        client.close()
+        began = time.monotonic()
+        server.shutdown()
+        server.server_close()
+        svc.shutdown(grace=0.2)
+        assert time.monotonic() - began < 0.5
+
+
+def test_http_short_body_is_bad_request(http_server):
+    port, recorder = http_server
+    client = socket.create_connection(("127.0.0.1", port), timeout=1)
+    client.sendall(
+        b"POST /v1/print/raw HTTP/1.0\r\n"
+        b"Content-Type: application/octet-stream\r\n"
+        b"Content-Length: 5\r\n\r\nabc"
+    )
+    client.shutdown(socket.SHUT_WR)
+    try:
+        response = _read_until(client, b"short read")
+        assert b"400 Bad Request" in response
+        assert b"short read" in response
+        assert recorder["writes"] == []
+    finally:
+        client.close()
 
 
 def test_http_oversized_is_text_plain(monkeypatch):
@@ -363,11 +491,11 @@ def test_roundtrip_real_receipt_fixture(http_server):
     assert recorder["cut_called"] is False
 
 
-def test_alt_raw_path_accepted(http_server):
+def test_non_contract_raw_path_rejected(http_server):
     port, recorder = http_server
     status, _, _ = _post(port, b"abc", path="/print/raw")
-    assert status == 200
-    assert recorder["writes"] == [b"abc"]
+    assert status == 404
+    assert recorder["writes"] == []
 
 
 def test_strip_speed_env_is_structural(monkeypatch):
