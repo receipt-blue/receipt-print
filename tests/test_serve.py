@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 
 import pytest
+import receipt_print.serve as serve_module
+from receipt_print.journal import PrintJournal
 
 from receipt_print.serve import (
     PrintQueueFull,
@@ -15,10 +17,17 @@ from receipt_print.serve import (
     PrintServiceStopped,
     PrintTimeout,
     _strip_speed_env,
-    make_server,
+    make_server as make_production_server,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "receipt_sample.bin"
+
+
+def make_server(*args, **kwargs):
+    kwargs.setdefault(
+        "executor", lambda data: serve_module.print_raw_bytes(data, cut=False)
+    )
+    return make_production_server(*args, **kwargs)
 
 
 @pytest.fixture
@@ -32,7 +41,7 @@ def service():
 
 
 @pytest.fixture
-def http_server(monkeypatch):
+def http_server(monkeypatch, tmp_path):
     recorder = {"writes": [], "cut_called": False, "closed": 0}
 
     class Recorder:
@@ -48,7 +57,11 @@ def http_server(monkeypatch):
     monkeypatch.setattr(
         "receipt_print.printer.connect_printer", lambda: Recorder()
     )
-    server, svc = make_server("127.0.0.1", 0)
+    server, svc = make_server(
+        "127.0.0.1",
+        0,
+        journal=PrintJournal(str(tmp_path / "jobs.sqlite3")),
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
@@ -66,11 +79,14 @@ def _post(
     path="/v1/print/raw",
     content_length=None,
     content_type="application/octet-stream",
+    job_id=None,
 ):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     headers = {"Content-Type": content_type}
     if content_length is not None:
         headers["Content-Length"] = str(content_length)
+    if job_id is not None:
+        headers["X-Receipt-Print-Job-Id"] = job_id
     conn.request("POST", path, body=body, headers=headers)
     resp = conn.getresponse()
     status = resp.status
@@ -495,6 +511,35 @@ def test_non_contract_raw_path_rejected(http_server):
     port, recorder = http_server
     status, _, _ = _post(port, b"abc", path="/print/raw")
     assert status == 404
+    assert recorder["writes"] == []
+
+
+def test_job_identity_replays_without_duplicate_print(http_server):
+    port, recorder = http_server
+    first_status, _, first_data = _post(port, b"receipt", job_id="edition:42")
+    replay_status, _, replay_data = _post(port, b"receipt", job_id="edition:42")
+    assert first_status == 200
+    assert replay_status == 200
+    assert json.loads(first_data)["replayed"] is False
+    assert json.loads(replay_data)["replayed"] is True
+    assert recorder["writes"] == [b"receipt"]
+
+
+def test_job_identity_rejects_different_payload(http_server):
+    port, recorder = http_server
+    assert _post(port, b"first", job_id="edition:conflict")[0] == 200
+    status, ctype, data = _post(port, b"second", job_id="edition:conflict")
+    assert status == 409
+    assert ctype == "application/json"
+    assert json.loads(data)["state"] == "conflict"
+    assert recorder["writes"] == [b"first"]
+
+
+def test_invalid_job_identity_is_rejected(http_server):
+    port, recorder = http_server
+    status, ctype, _ = _post(port, b"receipt", job_id="not valid")
+    assert status == 400
+    assert ctype.startswith("text/plain")
     assert recorder["writes"] == []
 
 

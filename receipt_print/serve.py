@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import queue
 import re
@@ -12,7 +13,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 
-from receipt_print.printer import print_raw_bytes
+from receipt_print.journal import PrintJournal, default_journal_path
+from receipt_print.printer import print_raw_bytes, print_raw_bytes_direct
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -47,12 +49,55 @@ DEFAULT_REQUEST_TIMEOUT = _positive_float_env("RP_SERVE_REQUEST_TIMEOUT", 5)
 RAW_PATHS = ("/v1/print/raw",)
 
 
+def _device_process(data: bytes, connection) -> None:
+    try:
+        print_raw_bytes_direct(data, cut=False)
+    except BaseException as exc:
+        try:
+            connection.send((type(exc).__name__, str(exc)))
+        finally:
+            connection.close()
+        raise
+    connection.close()
+
+
+def isolated_print_raw(data: bytes, *, timeout: float = DEFAULT_JOB_TIMEOUT) -> None:
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(target=_device_process, args=(data, child))
+    process.start()
+    child.close()
+    process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(1)
+        if process.is_alive():
+            process.kill()
+            process.join(1)
+        parent.close()
+        raise PrintTimeout(
+            f"printer device write exceeded {timeout:g}s; delivery outcome is ambiguous",
+            outcome_unknown=True,
+        )
+    error = parent.recv() if parent.poll() else None
+    parent.close()
+    if error is not None:
+        error_type, message = error
+        raise RuntimeError(f"{error_type}: {message}")
+    if process.exitcode != 0:
+        raise RuntimeError(f"printer device process exited with status {process.exitcode}")
+
+
 class PrintQueueFull(Exception):
     """Raised by submit() when the bounded queue cannot accept a job in time."""
 
 
 class PrintTimeout(Exception):
     """Raised by submit() when a job does not finish within its timeout."""
+
+    def __init__(self, message: str, *, outcome_unknown: bool = False) -> None:
+        super().__init__(message)
+        self.outcome_unknown = outcome_unknown
 
 
 class PrintServiceStopped(Exception):
@@ -150,9 +195,13 @@ class PrintService:
                 continue
         if not job.done.wait(timeout=timeout):
             with job.state_lock:
+                outcome_unknown = job.started
                 if not job.started:
                     job.cancelled = True
-            raise PrintTimeout(f"print job did not complete within {timeout}s")
+            raise PrintTimeout(
+                f"print job did not complete within {timeout}s",
+                outcome_unknown=outcome_unknown,
+            )
         if job.error is not None:
             raise job.error
         return job.result
@@ -224,6 +273,8 @@ class PrintService:
 def make_raw_handler(
     service: PrintService,
     *,
+    journal: PrintJournal,
+    executor: Callable[[bytes], None],
     max_bytes: int = MAX_BYTES,
     job_timeout: float = DEFAULT_JOB_TIMEOUT,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
@@ -321,21 +372,77 @@ def make_raw_handler(
             if len(body) != length:
                 self._text(400, "short read")
                 return
+            job_id = self.headers.get("X-Receipt-Print-Job-Id")
+            claim = None
+            if job_id is not None:
+                try:
+                    claim = journal.claim(job_id, body)
+                except ValueError as exc:
+                    self._text(400, str(exc))
+                    return
+                if claim.replayed:
+                    if claim.state == "printed":
+                        self._json(
+                            200,
+                            {
+                                "success": True,
+                                "bytes": len(body),
+                                "job_id": job_id,
+                                "state": "printed",
+                                "replayed": True,
+                            },
+                        )
+                        return
+                    self._json(
+                        409,
+                        {
+                            "success": False,
+                            "job_id": job_id,
+                            "state": claim.state,
+                            "replayed": True,
+                        },
+                    )
+                    return
             try:
                 service.submit(
-                    lambda: print_raw_bytes(body, cut=False), timeout=job_timeout
+                    lambda: executor(body), timeout=job_timeout + 2
                 )
             except PrintQueueFull as exc:
+                if job_id is not None:
+                    journal.finish(job_id, "failed", str(exc))
                 self._text(503, f"{type(exc).__name__}: {exc}")
                 return
             except PrintServiceStopped as exc:
+                if job_id is not None:
+                    journal.finish(job_id, "failed", str(exc))
                 self._text(503, f"{type(exc).__name__}: {exc}")
                 return
             except PrintTimeout as exc:
+                if job_id is not None:
+                    journal.finish(
+                        job_id,
+                        "ambiguous" if exc.outcome_unknown else "failed",
+                        str(exc),
+                    )
                 self._text(504, f"{type(exc).__name__}: {exc}")
                 return
             except BaseException as exc:
+                if job_id is not None:
+                    journal.finish(job_id, "failed", f"{type(exc).__name__}: {exc}")
                 self._text(502, f"{type(exc).__name__}: {exc}")
+                return
+            if job_id is not None:
+                journal.finish(job_id, "printed")
+                self._json(
+                    200,
+                    {
+                        "success": True,
+                        "bytes": len(body),
+                        "job_id": job_id,
+                        "state": "printed",
+                        "replayed": False,
+                    },
+                )
                 return
             self._json(200, {"success": True, "bytes": len(body)})
 
@@ -350,6 +457,8 @@ def make_server(
     port: int = 0,
     *,
     service: Optional[PrintService] = None,
+    journal: Optional[PrintJournal] = None,
+    executor: Optional[Callable[[bytes], None]] = None,
     max_bytes: int = MAX_BYTES,
     job_timeout: float = DEFAULT_JOB_TIMEOUT,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
@@ -359,8 +468,14 @@ def make_server(
     Returns (server, service) so tests can bind 127.0.0.1:0 and tear down.
     """
     svc = service or PrintService()
+    job_journal = journal or PrintJournal(default_journal_path())
+    device_executor = executor or (
+        lambda data: isolated_print_raw(data, timeout=job_timeout)
+    )
     handler = make_raw_handler(
         svc,
+        journal=job_journal,
+        executor=device_executor,
         max_bytes=max_bytes,
         job_timeout=job_timeout,
         request_timeout=request_timeout,

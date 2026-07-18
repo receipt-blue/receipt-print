@@ -5,6 +5,9 @@ let
   cfg = config.services.receipt-print-serve;
   printerEnvironment = {
     RP_HOST = "";
+    RP_PRINT_MODE = "direct";
+    RP_DEVICE_LOCK_PATH = "/run/receipt-print/device.lock";
+    RP_SERVE_STATE_PATH = "/var/lib/receipt-print/jobs.sqlite3";
     RP_VENDOR = cfg.vendor;
     RP_PROFILE = cfg.profile;
   }
@@ -123,6 +126,12 @@ in
         speed value cannot inject GS ( K pre-stream bytes onto the raw wire even if set here.
       '';
     };
+
+    configureClients = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Route receipt-print CLI commands through this service when it is healthy.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -135,14 +144,12 @@ in
           USB/File path is used.
         '';
       }
-      {
-        assertion = !((config.services ? kiosk) && config.services.kiosk.enable);
-        message = ''
-          services.receipt-print-serve must stay disabled when services.kiosk.enable is true:
-          the kiosk owns the Pi printer and its embedded /v1/print/raw endpoint.
-        '';
-      }
     ];
+
+    environment.sessionVariables = lib.mkIf cfg.configureClients {
+      RP_SERVICE_URL = "http://${cfg.host}:${toString cfg.port}";
+      RP_DEVICE_LOCK_PATH = "/run/receipt-print/device.lock";
+    };
 
     users.groups.${cfg.group} = { };
     users.users.${cfg.user} = {
@@ -172,6 +179,11 @@ in
         Restart = "on-failure";
         RestartSec = "3s";
         TimeoutStopSec = "15s";
+        StateDirectory = "receipt-print";
+        StateDirectoryMode = "0750";
+        RuntimeDirectory = "receipt-print";
+        RuntimeDirectoryMode = "0770";
+        UMask = "0007";
       };
     };
   };

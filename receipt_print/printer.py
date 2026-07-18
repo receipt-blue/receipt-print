@@ -355,8 +355,8 @@ def _connect_linux_usb(speed: Optional[int]):
     raise USBNotFoundError("No USB product candidates configured")
 
 
-def connect_printer():
-    """connect to the ESC/POS printer"""
+def connect_direct_printer():
+    """Connect directly to the ESC/POS printer."""
     speed = _resolve_speed()
     device_path = _configured_device_path()
     if device_path:
@@ -404,6 +404,69 @@ def connect_printer():
     p.charcode(CHARCODE)
     _apply_speed(p, speed)
     return p
+
+
+def _connect_locked_direct_printer(lock=None):
+    from receipt_print.routing import DeviceLock, LockedPrinter
+
+    device_lock = lock or DeviceLock()
+    if lock is None:
+        device_lock.acquire()
+    try:
+        return LockedPrinter(connect_direct_printer(), device_lock)
+    except BaseException:
+        device_lock.release()
+        raise
+
+
+def connect_printer():
+    """Use the local print service when ready, otherwise take a direct lease."""
+    from receipt_print.routing import (
+        DeviceLock,
+        ServicePrinter,
+        print_mode,
+        service_ready,
+        service_url,
+    )
+
+    mode = print_mode()
+    url = service_url()
+    if mode != "direct" and service_ready(url):
+        return ServicePrinter(
+            profile=PRINTER_PROFILE,
+            charcode=CHARCODE,
+            speed=_resolve_speed(),
+            apply_speed=_apply_speed,
+            url=url,
+        )
+    if mode == "service":
+        raise RuntimeError(f"receipt-print service is not ready at {url}")
+
+    lock = DeviceLock()
+    lock.acquire()
+    if mode == "auto" and service_ready(url):
+        lock.release()
+        return ServicePrinter(
+            profile=PRINTER_PROFILE,
+            charcode=CHARCODE,
+            speed=_resolve_speed(),
+            apply_speed=_apply_speed,
+            url=url,
+        )
+    return _connect_locked_direct_printer(lock)
+
+
+def print_raw_bytes_direct(data: bytes, cut: bool = False) -> None:
+    printer = _connect_locked_direct_printer()
+    try:
+        raw = getattr(printer, "_raw", None)
+        if not callable(raw):
+            raise RuntimeError("printer backend does not expose raw byte output")
+        raw(data)
+        if cut:
+            maybe_cut(printer)
+    finally:
+        printer.close()
 
 
 def print_raw_bytes(data: bytes, cut: bool = False) -> None:
