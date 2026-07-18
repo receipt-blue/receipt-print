@@ -24,6 +24,25 @@ class FakePrinter:
         self.closed += 1
 
 
+class RecordingPrinter:
+    def __init__(self):
+        self.texts = []
+        self.cuts = 0
+        self.closed = 0
+
+    def set(self, **_kwargs):
+        return None
+
+    def text(self, value):
+        self.texts.append(value)
+
+    def cut(self):
+        self.cuts += 1
+
+    def close(self):
+        self.closed += 1
+
+
 def test_auto_mode_uses_service_when_ready(monkeypatch):
     monkeypatch.setenv("RP_PRINT_MODE", "auto")
     monkeypatch.setattr("receipt_print.routing.service_ready", lambda url: True)
@@ -81,3 +100,25 @@ def test_service_mode_never_falls_back_to_device(monkeypatch):
         raised = True
         assert "not ready" in str(error)
     assert raised
+
+
+def test_no_cut_text_terminates_the_final_line(monkeypatch):
+    physical = RecordingPrinter()
+    monkeypatch.setattr(printer_module, "connect_printer", lambda: physical)
+
+    printer_module.print_text("hello", no_cut=True)
+
+    assert physical.texts == ["hello", "\n"]
+    assert physical.cuts == 0
+    assert physical.closed == 1
+
+
+def test_no_cut_text_does_not_add_a_second_line_feed(monkeypatch):
+    physical = RecordingPrinter()
+    monkeypatch.setattr(printer_module, "connect_printer", lambda: physical)
+
+    printer_module.print_text("hello\n", no_cut=True)
+
+    assert physical.texts == ["hello\n"]
+    assert physical.cuts == 0
+    assert physical.closed == 1

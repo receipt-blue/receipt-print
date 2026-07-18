@@ -520,7 +520,10 @@ def print_text(
     printer.text(wrapped_text)
     if size:
         printer.set(normal_textsize=True)
-    maybe_cut(printer, no_cut=no_cut)
+    if should_cut(no_cut):
+        printer.cut()
+    elif not wrapped_text.endswith("\n"):
+        printer.text("\n")
     printer.close()
 
 
