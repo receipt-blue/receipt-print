@@ -489,6 +489,47 @@ def test_healthz_reports_worker_alive(http_server):
     assert "queue" in body
 
 
+def test_device_process_reports_success(monkeypatch):
+    sent = []
+
+    class Connection:
+        def send(self, value):
+            sent.append(value)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "receipt_print.serve.print_raw_bytes_direct",
+        lambda *_args, **_kwargs: None,
+    )
+
+    serve_module._device_process(b"receipt", Connection())
+
+    assert sent == [None]
+
+
+def test_device_process_reports_failure(monkeypatch):
+    sent = []
+
+    class Connection:
+        def send(self, value):
+            sent.append(value)
+
+        def close(self):
+            return None
+
+    def fail(*_args, **_kwargs):
+        raise OSError("printer unavailable")
+
+    monkeypatch.setattr("receipt_print.serve.print_raw_bytes_direct", fail)
+
+    with pytest.raises(OSError, match="printer unavailable"):
+        serve_module._device_process(b"receipt", Connection())
+
+    assert sent == [("OSError", "printer unavailable")]
+
+
 def test_healthz_is_not_ready_when_configured_device_is_missing(
     http_server, monkeypatch
 ):

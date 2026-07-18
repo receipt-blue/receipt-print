@@ -59,6 +59,7 @@ def _device_process(data: bytes, connection) -> None:
         finally:
             connection.close()
         raise
+    connection.send(None)
     connection.close()
 
 
@@ -80,7 +81,10 @@ def isolated_print_raw(data: bytes, *, timeout: float = DEFAULT_JOB_TIMEOUT) -> 
             f"printer device write exceeded {timeout:g}s; delivery outcome is ambiguous",
             outcome_unknown=True,
         )
-    error = parent.recv() if parent.poll() else None
+    try:
+        error = parent.recv() if parent.poll() else None
+    except EOFError:
+        error = None
     parent.close()
     if error is not None:
         error_type, message = error
