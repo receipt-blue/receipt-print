@@ -485,7 +485,20 @@ def test_healthz_reports_worker_alive(http_server):
     assert ctype == "application/json"
     body = json.loads(data)
     assert body["worker_alive"] is True
+    assert body["device_available"] is True
     assert "queue" in body
+
+
+def test_healthz_is_not_ready_when_configured_device_is_missing(
+    http_server, monkeypatch
+):
+    port, _ = http_server
+    monkeypatch.setenv("RP_DEVICE", "/definitely/missing/receipt-printer")
+    status, _, data = _get(port, "/healthz")
+    body = json.loads(data)
+    assert status == 503
+    assert body["ready"] is False
+    assert body["device_available"] is False
 
 
 def test_unknown_path_404_text_plain(http_server):

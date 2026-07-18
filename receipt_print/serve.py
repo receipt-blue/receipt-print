@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from receipt_print.journal import PrintJournal, default_journal_path
@@ -208,7 +209,9 @@ class PrintService:
 
     def health(self) -> dict[str, Any]:
         worker_alive = self._worker.is_alive()
-        ready = worker_alive and not self._stopping.is_set()
+        device_path = os.getenv("RP_DEVICE")
+        device_available = not device_path or Path(device_path).exists()
+        ready = worker_alive and not self._stopping.is_set() and device_available
         return {
             "ok": ready,
             "ready": ready,
@@ -217,6 +220,8 @@ class PrintService:
             "heartbeat_age": (time.monotonic() - self._heartbeat)
             if self._heartbeat
             else None,
+            "device_path": device_path,
+            "device_available": device_available,
             "stopping": self._stopping.is_set(),
         }
 
