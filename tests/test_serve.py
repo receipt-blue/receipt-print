@@ -489,6 +489,16 @@ def test_healthz_reports_worker_alive(http_server):
     assert "queue" in body
 
 
+def test_livez_reports_service_liveness(http_server):
+    port, _ = http_server
+    status, ctype, data = _get(port, "/livez")
+    assert status == 200
+    assert ctype == "application/json"
+    body = json.loads(data)
+    assert body["live"] is True
+    assert body["worker_alive"] is True
+
+
 def test_device_process_reports_success(monkeypatch):
     sent = []
 
@@ -540,6 +550,12 @@ def test_healthz_is_not_ready_when_configured_device_is_missing(
     assert status == 503
     assert body["ready"] is False
     assert body["device_available"] is False
+
+    live_status, _, live_data = _get(port, "/livez")
+    live_body = json.loads(live_data)
+    assert live_status == 200
+    assert live_body["live"] is True
+    assert live_body["ready"] is False
 
 
 def test_unknown_path_404_text_plain(http_server):

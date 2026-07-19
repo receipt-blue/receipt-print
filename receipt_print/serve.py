@@ -213,11 +213,14 @@ class PrintService:
 
     def health(self) -> dict[str, Any]:
         worker_alive = self._worker.is_alive()
+        stopping = self._stopping.is_set()
         device_path = os.getenv("RP_DEVICE")
         device_available = not device_path or Path(device_path).exists()
-        ready = worker_alive and not self._stopping.is_set() and device_available
+        live = worker_alive and not stopping
+        ready = live and device_available
         return {
             "ok": ready,
+            "live": live,
             "ready": ready,
             "worker_alive": worker_alive,
             "queue": self._queue.qsize(),
@@ -226,7 +229,7 @@ class PrintService:
             else None,
             "device_path": device_path,
             "device_available": device_available,
-            "stopping": self._stopping.is_set(),
+            "stopping": stopping,
         }
 
     def _cancel_queued_jobs(self) -> None:
@@ -332,6 +335,10 @@ def make_raw_handler(
 
         def do_GET(self) -> None:
             self.close_connection = True
+            if self.path == "/livez":
+                health = service.health()
+                self._json(200 if health["live"] else 503, health)
+                return
             if self.path == "/healthz":
                 health = service.health()
                 self._json(200 if health["ready"] else 503, health)
