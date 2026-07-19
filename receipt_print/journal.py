@@ -83,6 +83,17 @@ class PrintJournal:
                 connection.commit()
                 return JobClaim(job_id, digest, "printing", False)
             existing_digest, state = row
+            if existing_digest == digest and state == "failed":
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state = 'printing', error = NULL, updated_at = ?
+                    WHERE job_id = ? AND state = 'failed'
+                    """,
+                    (now, job_id),
+                )
+                connection.commit()
+                return JobClaim(job_id, digest, "printing", False)
             connection.commit()
         if existing_digest != digest:
             return JobClaim(job_id, digest, "conflict", True)

@@ -8,8 +8,11 @@ used by the daemon. Set `RP_PRINT_MODE=service` to require the daemon or
 
 The service serializes jobs, isolates each device write behind a hard timeout,
 and journals `X-Receipt-Print-Job-Id` values so a lost response cannot cause an
-automatic duplicate. A timed-out started write is reported as ambiguous and
-requires a new job identity for an intentional retry.
+automatic duplicate. The client retries a lost HTTP response once, within the
+same delivery deadline and with the same identity. A job that definitely failed
+before delivery can be retried with its original identity; a timed-out started
+write is reported as ambiguous and requires a new identity for an intentional
+retry.
 
 A Unix-inspired CLI for printing content on thermal receipt printers.
 

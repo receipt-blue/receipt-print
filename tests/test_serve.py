@@ -589,6 +589,38 @@ def test_job_identity_rejects_different_payload(http_server):
     assert recorder["writes"] == [b"first"]
 
 
+def test_failed_job_identity_can_be_retried(tmp_path):
+    writes = []
+    attempts = 0
+
+    def fail_once(data):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("printer unavailable")
+        writes.append(data)
+
+    server, svc = make_production_server(
+        "127.0.0.1",
+        0,
+        journal=PrintJournal(str(tmp_path / "jobs.sqlite3")),
+        executor=fail_once,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    retry_port = server.server_address[1]
+    try:
+        assert _post(retry_port, b"receipt", job_id="edition:retry")[0] == 502
+        status, _, data = _post(retry_port, b"receipt", job_id="edition:retry")
+        assert status == 200
+        assert json.loads(data)["replayed"] is False
+        assert writes == [b"receipt"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        svc.shutdown()
+
+
 def test_invalid_job_identity_is_rejected(http_server):
     port, recorder = http_server
     status, ctype, _ = _post(port, b"receipt", job_id="not valid")

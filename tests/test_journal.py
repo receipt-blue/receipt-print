@@ -30,3 +30,23 @@ def test_restart_marks_inflight_job_ambiguous(tmp_path):
     recovered = PrintJournal(str(path)).claim("job-1", b"receipt")
     assert recovered.state == "ambiguous"
     assert recovered.replayed is True
+
+
+def test_failed_job_can_be_reclaimed_with_the_same_bytes(tmp_path):
+    journal = PrintJournal(str(tmp_path / "jobs.sqlite3"))
+    journal.claim("job-1", b"receipt")
+    journal.finish("job-1", "failed", "printer unavailable")
+
+    retry = journal.claim("job-1", b"receipt")
+    assert retry.state == "printing"
+    assert retry.replayed is False
+
+
+def test_ambiguous_job_cannot_be_reclaimed(tmp_path):
+    journal = PrintJournal(str(tmp_path / "jobs.sqlite3"))
+    journal.claim("job-1", b"receipt")
+    journal.finish("job-1", "ambiguous", "write timed out")
+
+    retry = journal.claim("job-1", b"receipt")
+    assert retry.state == "ambiguous"
+    assert retry.replayed is True

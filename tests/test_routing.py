@@ -67,12 +67,40 @@ def test_submit_raw_sends_stable_identity(monkeypatch):
 
 
 def test_submit_raw_reports_ambiguous_connection_failure(monkeypatch):
+    attempts = []
+
     def unavailable(*args, **kwargs):
+        attempts.append(kwargs["headers"]["X-Receipt-Print-Job-Id"])
         raise requests.ConnectionError("response lost")
 
     monkeypatch.setattr("receipt_print.routing.requests.post", unavailable)
     with pytest.raises(RuntimeError, match="may have printed"):
         submit_raw(b"receipt", job_id="edition:42", url="http://printer")
+    assert attempts == ["edition:42", "edition:42"]
+
+
+def test_submit_raw_recovers_lost_response_without_changing_identity(monkeypatch):
+    attempts = []
+
+    def post(*args, **kwargs):
+        identity = kwargs["headers"]["X-Receipt-Print-Job-Id"]
+        attempts.append(identity)
+        if len(attempts) == 1:
+            raise requests.ConnectionError("response lost")
+        return Response(
+            payload={
+                "success": True,
+                "job_id": identity,
+                "state": "printed",
+                "replayed": True,
+            }
+        )
+
+    monkeypatch.setattr("receipt_print.routing.requests.post", post)
+    result = submit_raw(b"receipt", job_id="edition:42", url="http://printer")
+    assert result["state"] == "printed"
+    assert result["replayed"] is True
+    assert attempts == ["edition:42", "edition:42"]
 
 
 def test_service_printer_submits_rendered_bytes(monkeypatch):
@@ -118,3 +146,21 @@ def test_journal_payload_is_json_serializable(monkeypatch):
         ),
     )
     assert json.dumps(submit_raw(b"x", job_id="job-1"))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": True, "job_id": "job-1"},
+        {"success": True, "job_id": "job-1", "state": "ambiguous"},
+        {"success": True, "job_id": "different", "state": "printed"},
+        {"success": False, "job_id": "job-1", "state": "printed"},
+    ],
+)
+def test_submit_raw_requires_exact_printed_confirmation(monkeypatch, payload):
+    monkeypatch.setattr(
+        "receipt_print.routing.requests.post",
+        lambda *args, **kwargs: Response(payload=payload),
+    )
+    with pytest.raises(RuntimeError, match="truthfully confirm"):
+        submit_raw(b"x", job_id="job-1", url="http://printer")

@@ -66,20 +66,30 @@ def submit_raw(
         raise RuntimeError("receipt-print service URL is disabled")
     timeout = _positive_float_env("RP_SERVICE_DELIVERY_TIMEOUT", DEFAULT_DELIVERY_TIMEOUT)
     identity = job_id or str(uuid.uuid4())
-    try:
-        response = requests.post(
-            f"{target}/v1/print/raw",
-            data=data,
-            headers={
-                "Content-Type": "application/octet-stream",
-                "X-Receipt-Print-Job-Id": identity,
-            },
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
+    deadline = time.monotonic() + timeout
+    response = None
+    last_error = None
+    for _attempt in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            response = requests.post(
+                f"{target}/v1/print/raw",
+                data=data,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "X-Receipt-Print-Job-Id": identity,
+                },
+                timeout=remaining,
+            )
+            break
+        except requests.RequestException as exc:
+            last_error = exc
+    if response is None:
         raise RuntimeError(
-            f"receipt-print service delivery failed; job {identity} may have printed: {exc}"
-        ) from exc
+            f"receipt-print service delivery failed; job {identity} may have printed: {last_error}"
+        ) from last_error
     if response.status_code != 200:
         message = response.text.strip() or response.reason
         raise RuntimeError(
@@ -92,8 +102,14 @@ def submit_raw(
         raise RuntimeError(
             f"receipt-print service returned an invalid response for job {identity}"
         ) from exc
-    if payload.get("success") is not True:
-        raise RuntimeError(f"receipt-print service did not confirm job {identity}")
+    if (
+        payload.get("success") is not True
+        or payload.get("state") != "printed"
+        or payload.get("job_id") != identity
+    ):
+        raise RuntimeError(
+            f"receipt-print service did not truthfully confirm job {identity} as printed"
+        )
     return payload
 
 
