@@ -102,6 +102,62 @@ def test_service_mode_never_falls_back_to_device(monkeypatch):
     assert raised
 
 
+def test_open_usb_filters_device_and_bounds_writes(monkeypatch):
+    calls = []
+
+    class FakeUsb:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def open(self):
+            return None
+
+        def charcode(self, _value):
+            return None
+
+    monkeypatch.setattr(printer_module, "Usb", FakeUsb)
+    monkeypatch.setattr(printer_module, "_apply_speed", lambda _printer, _speed: None)
+
+    backend = object()
+    printer_module._open_usb(0x04B8, 0x0E2B, None, backend=backend)
+
+    assert calls == [
+        {
+            "idVendor": 0x04B8,
+            "idProduct": 0x0E2B,
+            "profile": printer_module.PRINTER_PROFILE,
+            "timeout": 30000,
+            "usb_args": {"backend": backend},
+        }
+    ]
+
+
+def test_direct_raw_output_is_chunked(monkeypatch):
+    writes = []
+
+    class RawPrinter:
+        def _raw(self, data):
+            writes.append(data)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        printer_module,
+        "_connect_locked_direct_printer",
+        lambda: RawPrinter(),
+    )
+    payload = b"x" * (printer_module.RAW_CHUNK_BYTES * 2 + 7)
+
+    printer_module.print_raw_bytes_direct(payload)
+
+    assert [len(chunk) for chunk in writes] == [
+        printer_module.RAW_CHUNK_BYTES,
+        printer_module.RAW_CHUNK_BYTES,
+        7,
+    ]
+
+
 def test_no_cut_text_terminates_the_final_line(monkeypatch):
     physical = RecordingPrinter()
     monkeypatch.setattr(printer_module, "connect_printer", lambda: physical)

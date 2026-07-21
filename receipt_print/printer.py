@@ -21,6 +21,7 @@ DOTS_PER_LINE = 24  # ~1 text line per 24 px
 WRAP_MODES = {"hyphen", "word", "none"}
 WRAP_TOKEN_RE = re.compile(r"\S+|\s+")
 SPEED_OVERRIDE_ENV = "RP_SPEED_OVERRIDE"
+RAW_CHUNK_BYTES = 16 * 1024
 
 
 def remove_ansi(text: str) -> str:
@@ -292,13 +293,22 @@ def _configured_product_id() -> Optional[int]:
     return _hex_id(PRODUCT_HEX, "RP_PRODUCT")
 
 
-def _open_usb(vendor_id: int, product_id: Optional[int], speed: Optional[int]):
+def _open_usb(
+    vendor_id: int,
+    product_id: Optional[int],
+    speed: Optional[int],
+    *,
+    backend=None,
+):
     kwargs = {
         "idVendor": vendor_id,
         "profile": PRINTER_PROFILE,
+        "timeout": 30000,
     }
     if product_id is not None:
         kwargs["idProduct"] = product_id
+    if backend is not None:
+        kwargs["usb_args"] = {"backend": backend}
     p = Usb(**kwargs)
     p.open()
     p.charcode(CHARCODE)
@@ -322,6 +332,36 @@ def _discovered_product_ids(vendor_id: int) -> List[int]:
     except Exception:
         return []
     return product_ids
+
+
+def printer_device_available() -> bool:
+    device_path = _configured_device_path()
+    if device_path:
+        return os.path.exists(device_path)
+
+    if platform.system() == "Linux" and any(
+        os.path.exists(path) for path in _device_candidates()
+    ):
+        return True
+
+    if os.getenv("RP_NO_USB", "0") != "1":
+        try:
+            import usb.backend.libusb1
+            import usb.core
+
+            backend = usb.backend.libusb1.get_backend()
+            if backend is not None:
+                vendor_id = int(VENDOR_HEX, 16)
+                product_id = _configured_product_id()
+                usb_args = {"idVendor": vendor_id, "backend": backend}
+                if product_id is not None:
+                    usb_args["idProduct"] = product_id
+                if usb.core.find(**usb_args) is not None:
+                    return True
+        except (SystemExit, Exception):
+            pass
+
+    return bool(NETWORK_HOST)
 
 
 def _connect_linux_usb(speed: Optional[int]):
@@ -376,13 +416,15 @@ def connect_direct_printer():
             else:
                 import usb.backend.libusb1, usb.core  # noqa
 
-                backend = usb.backend.libusb1.get_backend(
-                    find_library=lambda _: "/opt/homebrew/lib/libusb-1.0.dylib"
+                backend = usb.backend.libusb1.get_backend()
+                if backend is None:
+                    raise RuntimeError("libusb backend is unavailable")
+                p = _open_usb(
+                    _hex_id(VENDOR_HEX, "RP_VENDOR"),
+                    _configured_product_id(),
+                    speed,
+                    backend=backend,
                 )
-                p = Usb(profile=PRINTER_PROFILE, backend=backend)
-            p.open()
-            p.charcode(CHARCODE)
-            _apply_speed(p, speed)
             return p
         except Exception as exc:
             message = str(exc)
@@ -462,7 +504,8 @@ def print_raw_bytes_direct(data: bytes, cut: bool = False) -> None:
         raw = getattr(printer, "_raw", None)
         if not callable(raw):
             raise RuntimeError("printer backend does not expose raw byte output")
-        raw(data)
+        for offset in range(0, len(data), RAW_CHUNK_BYTES):
+            raw(data[offset : offset + RAW_CHUNK_BYTES])
         if cut:
             maybe_cut(printer)
     finally:

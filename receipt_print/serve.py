@@ -9,13 +9,17 @@ import queue
 import re
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 from receipt_print.journal import PrintJournal, default_journal_path
-from receipt_print.printer import print_raw_bytes, print_raw_bytes_direct
+from receipt_print.printer import (
+    print_raw_bytes,
+    print_raw_bytes_direct,
+    printer_device_available,
+)
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -40,14 +44,34 @@ def _positive_float_env(name: str, default: float) -> float:
     return value
 
 
+def _optional_positive_float_env(name: str) -> Optional[float]:
+    raw = os.getenv(name)
+    if raw in (None, "", "0"):
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be zero or a positive number") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be zero or a positive number")
+    return value
+
+
 MAX_BYTES = _positive_int_env("RP_SERVE_MAX_BYTES", 8 * 1024 * 1024)
 DEFAULT_QUEUE_MAX = _positive_int_env("RP_SERVE_QUEUE_MAX", 32)
-DEFAULT_JOB_TIMEOUT = _positive_float_env("RP_SERVE_JOB_TIMEOUT", 30)
+DEFAULT_JOB_TIMEOUT = _optional_positive_float_env("RP_SERVE_JOB_TIMEOUT")
 DEFAULT_ENQUEUE_TIMEOUT = _positive_float_env("RP_SERVE_ENQUEUE_TIMEOUT", 5)
 DEFAULT_DRAIN_GRACE = _positive_float_env("RP_SERVE_DRAIN_GRACE", 10)
 DEFAULT_REQUEST_TIMEOUT = _positive_float_env("RP_SERVE_REQUEST_TIMEOUT", 5)
 
 RAW_PATHS = ("/v1/print/raw",)
+
+
+def _metadata_header(value: Optional[str], max_length: int) -> Optional[str]:
+    if value is None:
+        return None
+    decoded = urllib.parse.unquote(value).strip()
+    return decoded[:max_length] or None
 
 
 def _device_process(data: bytes, connection) -> None:
@@ -63,14 +87,18 @@ def _device_process(data: bytes, connection) -> None:
     connection.close()
 
 
-def isolated_print_raw(data: bytes, *, timeout: float = DEFAULT_JOB_TIMEOUT) -> None:
+def isolated_print_raw(
+    data: bytes,
+    *,
+    timeout: Optional[float] = DEFAULT_JOB_TIMEOUT,
+) -> None:
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe(duplex=False)
     process = context.Process(target=_device_process, args=(data, child))
     process.start()
     child.close()
     process.join(timeout)
-    if process.is_alive():
+    if timeout is not None and process.is_alive():
         process.terminate()
         process.join(1)
         if process.is_alive():
@@ -175,13 +203,13 @@ class PrintService:
         self,
         fn: Callable[[], Any],
         *,
-        timeout: float = DEFAULT_JOB_TIMEOUT,
+        timeout: Optional[float] = DEFAULT_JOB_TIMEOUT,
         enqueue_timeout: float = DEFAULT_ENQUEUE_TIMEOUT,
     ) -> Any:
         """Enqueue a job, wait for its result, and propagate its exception."""
         if self._stopping.is_set() or not self._started:
             raise PrintServiceStopped("print service is not accepting jobs")
-        if timeout <= 0:
+        if timeout is not None and timeout <= 0:
             raise ValueError("timeout must be positive")
         if enqueue_timeout <= 0:
             raise ValueError("enqueue_timeout must be positive")
@@ -215,7 +243,7 @@ class PrintService:
         worker_alive = self._worker.is_alive()
         stopping = self._stopping.is_set()
         device_path = os.getenv("RP_DEVICE")
-        device_available = not device_path or Path(device_path).exists()
+        device_available = printer_device_available()
         live = worker_alive and not stopping
         ready = live and device_available
         return {
@@ -288,13 +316,13 @@ def make_raw_handler(
     journal: PrintJournal,
     executor: Callable[[bytes], None],
     max_bytes: int = MAX_BYTES,
-    job_timeout: float = DEFAULT_JOB_TIMEOUT,
+    job_timeout: Optional[float] = DEFAULT_JOB_TIMEOUT,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> type[BaseHTTPRequestHandler]:
     """Build the HTTP handler for the kiosk-compatible raw endpoint."""
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
-    if job_timeout <= 0:
+    if job_timeout is not None and job_timeout <= 0:
         raise ValueError("job_timeout must be positive")
     if request_timeout <= 0:
         raise ValueError("request_timeout must be positive")
@@ -389,10 +417,23 @@ def make_raw_handler(
                 self._text(400, "short read")
                 return
             job_id = self.headers.get("X-Receipt-Print-Job-Id")
+            title = _metadata_header(
+                self.headers.get("X-Receipt-Print-Title"),
+                512,
+            )
+            source = _metadata_header(
+                self.headers.get("X-Receipt-Print-Source"),
+                128,
+            )
             claim = None
             if job_id is not None:
                 try:
-                    claim = journal.claim(job_id, body)
+                    claim = journal.claim(
+                        job_id,
+                        body,
+                        title=title,
+                        source=source,
+                    )
                 except ValueError as exc:
                     self._text(400, str(exc))
                     return
@@ -421,7 +462,8 @@ def make_raw_handler(
                     return
             try:
                 service.submit(
-                    lambda: executor(body), timeout=job_timeout + 2
+                    lambda: executor(body),
+                    timeout=None if job_timeout is None else job_timeout + 2,
                 )
             except PrintQueueFull as exc:
                 if job_id is not None:
@@ -476,7 +518,7 @@ def make_server(
     journal: Optional[PrintJournal] = None,
     executor: Optional[Callable[[bytes], None]] = None,
     max_bytes: int = MAX_BYTES,
-    job_timeout: float = DEFAULT_JOB_TIMEOUT,
+    job_timeout: Optional[float] = DEFAULT_JOB_TIMEOUT,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> tuple[ThreadingHTTPServer, PrintService]:
     """Build (but do not serve) a standalone raw-print server bound to host:port.
@@ -515,7 +557,7 @@ def run_server(
     port: int = 9100,
     *,
     max_bytes: int = MAX_BYTES,
-    job_timeout: float = DEFAULT_JOB_TIMEOUT,
+    job_timeout: Optional[float] = DEFAULT_JOB_TIMEOUT,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> None:
     """Run the standalone server for non-kiosk clients."""

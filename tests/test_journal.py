@@ -1,3 +1,5 @@
+import sqlite3
+
 from receipt_print.journal import PrintJournal
 
 
@@ -50,3 +52,34 @@ def test_ambiguous_job_cannot_be_reclaimed(tmp_path):
     retry = journal.claim("job-1", b"receipt")
     assert retry.state == "ambiguous"
     assert retry.replayed is True
+
+
+def test_job_metadata_is_persisted_and_old_schema_is_migrated(tmp_path):
+    path = tmp_path / "jobs.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                digest TEXT NOT NULL,
+                state TEXT NOT NULL,
+                byte_count INTEGER NOT NULL,
+                error TEXT,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+
+    journal = PrintJournal(str(path))
+    journal.claim(
+        "job-1",
+        b"receipt",
+        title="FIFA World Cup",
+        source="wikireceipt",
+    )
+
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            "SELECT title, source FROM jobs WHERE job_id = 'job-1'"
+        ).fetchone()
+    assert row == ("FIFA World Cup", "wikireceipt")

@@ -6,13 +6,12 @@ available, the CLI retains direct printer access under the same device lock
 used by the daemon. Set `RP_PRINT_MODE=service` to require the daemon or
 `RP_PRINT_MODE=direct` to bypass it explicitly.
 
-The service serializes jobs, isolates each device write behind a hard timeout,
-and journals `X-Receipt-Print-Job-Id` values so a lost response cannot cause an
-automatic duplicate. The client retries a lost HTTP response once, within the
-same delivery deadline and with the same identity. A job that definitely failed
-before delivery can be retried with its original identity; a timed-out started
-write is reported as ambiguous and requires a new identity for an intentional
-retry.
+The service serializes jobs, streams raw output in bounded USB transfers, and
+journals `X-Receipt-Print-Job-Id` values so a lost response cannot cause an
+automatic duplicate. Print jobs have no total-duration cutoff by default. Set
+`RP_SERVE_JOB_TIMEOUT` and `RP_SERVICE_DELIVERY_TIMEOUT` to positive seconds to
+impose explicit server and client deadlines. The client retries a lost HTTP
+response once with the same identity.
 
 A Unix-inspired CLI for printing content on thermal receipt printers.
 

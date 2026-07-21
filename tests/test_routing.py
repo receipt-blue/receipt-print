@@ -59,11 +59,19 @@ def test_submit_raw_sends_stable_identity(monkeypatch):
         )
 
     monkeypatch.setattr("receipt_print.routing.requests.post", post)
-    result = submit_raw(b"receipt", job_id="edition:42", url="http://printer")
+    result = submit_raw(
+        b"receipt",
+        job_id="edition:42",
+        url="http://printer",
+        title="FIFA World Cup™",
+        source="receipt wiki",
+    )
     assert result["state"] == "printed"
     assert seen["url"] == "http://printer/v1/print/raw"
     assert seen["data"] == b"receipt"
     assert seen["headers"]["X-Receipt-Print-Job-Id"] == "edition:42"
+    assert seen["headers"]["X-Receipt-Print-Title"] == "FIFA%20World%20Cup%E2%84%A2"
+    assert seen["headers"]["X-Receipt-Print-Source"] == "receipt%20wiki"
 
 
 def test_submit_raw_reports_ambiguous_connection_failure(monkeypatch):

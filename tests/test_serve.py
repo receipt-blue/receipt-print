@@ -57,6 +57,7 @@ def http_server(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "receipt_print.printer.connect_printer", lambda: Recorder()
     )
+    monkeypatch.setattr("receipt_print.serve.printer_device_available", lambda: True)
     server, svc = make_server(
         "127.0.0.1",
         0,
@@ -545,6 +546,7 @@ def test_healthz_is_not_ready_when_configured_device_is_missing(
 ):
     port, _ = http_server
     monkeypatch.setenv("RP_DEVICE", "/definitely/missing/receipt-printer")
+    monkeypatch.setattr("receipt_print.serve.printer_device_available", lambda: False)
     status, _, data = _get(port, "/healthz")
     body = json.loads(data)
     assert status == 503

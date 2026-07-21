@@ -46,6 +46,13 @@ class PrintJournal:
                 )
                 """
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(jobs)")
+            }
+            if "title" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN title TEXT")
+            if "source" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN source TEXT")
 
     def _recover_inflight(self) -> None:
         with self._connect() as connection:
@@ -60,7 +67,14 @@ class PrintJournal:
                 (time.time(),),
             )
 
-    def claim(self, job_id: str, data: bytes) -> JobClaim:
+    def claim(
+        self,
+        job_id: str,
+        data: bytes,
+        *,
+        title: str | None = None,
+        source: str | None = None,
+    ) -> JobClaim:
         if not JOB_ID_RE.fullmatch(job_id):
             raise ValueError(
                 "X-Receipt-Print-Job-Id must contain 1-128 letters, digits, ., _, :, or -"
@@ -75,10 +89,12 @@ class PrintJournal:
             if row is None:
                 connection.execute(
                     """
-                    INSERT INTO jobs (job_id, digest, state, byte_count, error, updated_at)
-                    VALUES (?, ?, 'printing', ?, NULL, ?)
+                    INSERT INTO jobs (
+                        job_id, digest, state, byte_count, error, updated_at, title, source
+                    )
+                    VALUES (?, ?, 'printing', ?, NULL, ?, ?, ?)
                     """,
-                    (job_id, digest, len(data), now),
+                    (job_id, digest, len(data), now, title, source),
                 )
                 connection.commit()
                 return JobClaim(job_id, digest, "printing", False)
@@ -87,10 +103,11 @@ class PrintJournal:
                 connection.execute(
                     """
                     UPDATE jobs
-                    SET state = 'printing', error = NULL, updated_at = ?
+                    SET state = 'printing', error = NULL, updated_at = ?,
+                        title = COALESCE(title, ?), source = COALESCE(source, ?)
                     WHERE job_id = ? AND state = 'failed'
                     """,
-                    (now, job_id),
+                    (now, title, source, job_id),
                 )
                 connection.commit()
                 return JobClaim(job_id, digest, "printing", False)

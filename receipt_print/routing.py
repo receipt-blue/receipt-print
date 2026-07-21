@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import os
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -13,7 +14,6 @@ from escpos.printer import Dummy
 
 DEFAULT_SERVICE_URL = "http://127.0.0.1:9100"
 DEFAULT_HEALTH_TIMEOUT = 0.25
-DEFAULT_DELIVERY_TIMEOUT = 35.0
 DEFAULT_LOCK_TIMEOUT = 35.0
 DEFAULT_LOCK_PATH = "/tmp/receipt-print-device.lock"
 
@@ -26,6 +26,19 @@ def _positive_float_env(name: str, default: float) -> float:
         raise RuntimeError(f"{name} must be a positive number") from exc
     if value <= 0:
         raise RuntimeError(f"{name} must be a positive number")
+    return value
+
+
+def _optional_positive_float_env(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw in (None, "", "0"):
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be zero or a positive number") from exc
+    if value < 0:
+        raise RuntimeError(f"{name} must be zero or a positive number")
     return value
 
 
@@ -60,28 +73,31 @@ def submit_raw(
     *,
     job_id: str | None = None,
     url: str | None = None,
+    title: str | None = None,
+    source: str | None = None,
 ) -> dict:
     target = url if url is not None else service_url()
     if not target:
         raise RuntimeError("receipt-print service URL is disabled")
-    timeout = _positive_float_env("RP_SERVICE_DELIVERY_TIMEOUT", DEFAULT_DELIVERY_TIMEOUT)
+    timeout = _optional_positive_float_env("RP_SERVICE_DELIVERY_TIMEOUT")
     identity = job_id or str(uuid.uuid4())
-    deadline = time.monotonic() + timeout
     response = None
     last_error = None
     for _attempt in range(2):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
         try:
+            headers = {
+                "Content-Type": "application/octet-stream",
+                "X-Receipt-Print-Job-Id": identity,
+            }
+            if title:
+                headers["X-Receipt-Print-Title"] = urllib.parse.quote(title)
+            if source:
+                headers["X-Receipt-Print-Source"] = urllib.parse.quote(source)
             response = requests.post(
                 f"{target}/v1/print/raw",
                 data=data,
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "X-Receipt-Print-Job-Id": identity,
-                },
-                timeout=remaining,
+                headers=headers,
+                timeout=(5, timeout),
             )
             break
         except requests.RequestException as exc:
