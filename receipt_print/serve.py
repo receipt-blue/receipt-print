@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from receipt_print.journal import PrintJournal, default_journal_path
 from receipt_print.printer import (
+    PrinterUnavailableError,
     print_raw_bytes,
     print_raw_bytes_direct,
     printer_device_available,
@@ -116,6 +117,8 @@ def isolated_print_raw(
     parent.close()
     if error is not None:
         error_type, message = error
+        if error_type == PrinterUnavailableError.__name__:
+            raise PrinterUnavailableError(message)
         raise RuntimeError(f"{error_type}: {message}")
     if process.exitcode != 0:
         raise RuntimeError(f"printer device process exited with status {process.exitcode}")
@@ -471,6 +474,11 @@ def make_raw_handler(
                 self._text(503, f"{type(exc).__name__}: {exc}")
                 return
             except PrintServiceStopped as exc:
+                if job_id is not None:
+                    journal.finish(job_id, "failed", str(exc))
+                self._text(503, f"{type(exc).__name__}: {exc}")
+                return
+            except PrinterUnavailableError as exc:
                 if job_id is not None:
                     journal.finish(job_id, "failed", str(exc))
                 self._text(503, f"{type(exc).__name__}: {exc}")

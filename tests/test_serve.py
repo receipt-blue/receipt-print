@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import receipt_print.serve as serve_module
 from receipt_print.journal import PrintJournal
+from receipt_print.printer import PrinterUnavailableError
 
 from receipt_print.serve import (
     PrintQueueFull,
@@ -448,6 +449,29 @@ def test_http_job_error_is_text_plain(monkeypatch):
         assert status == 502
         assert ctype.startswith("text/plain")
         assert b"device unplugged" in data
+    finally:
+        server.shutdown()
+        server.server_close()
+        svc.shutdown()
+
+
+def test_http_printer_unavailable_is_retryable_service_failure(tmp_path):
+    def unavailable(_data):
+        raise PrinterUnavailableError("USB receipt printer is unavailable")
+
+    server, svc = make_production_server(
+        "127.0.0.1",
+        0,
+        journal=PrintJournal(str(tmp_path / "jobs.sqlite3")),
+        executor=unavailable,
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    try:
+        status, ctype, data = _post(port, b"hello")
+        assert status == 503
+        assert ctype.startswith("text/plain")
+        assert b"PrinterUnavailableError" in data
     finally:
         server.shutdown()
         server.server_close()

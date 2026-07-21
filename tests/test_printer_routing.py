@@ -158,6 +158,33 @@ def test_direct_raw_output_is_chunked(monkeypatch):
     ]
 
 
+def test_direct_raw_output_retries_connection_before_writing(monkeypatch):
+    attempts = 0
+    writes = []
+
+    class RawPrinter:
+        def _raw(self, data):
+            writes.append(data)
+
+        def close(self):
+            return None
+
+    def connect():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise printer_module.PrinterUnavailableError("not ready")
+        return RawPrinter()
+
+    monkeypatch.setattr(printer_module, "_connect_locked_direct_printer", connect)
+    monkeypatch.setattr(printer_module.time, "sleep", lambda _seconds: None)
+
+    printer_module.print_raw_bytes_direct(b"receipt")
+
+    assert attempts == 3
+    assert writes == [b"receipt"]
+
+
 def test_no_cut_text_terminates_the_final_line(monkeypatch):
     physical = RecordingPrinter()
     monkeypatch.setattr(printer_module, "connect_printer", lambda: physical)

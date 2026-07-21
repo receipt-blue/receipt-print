@@ -3,6 +3,7 @@ import os
 import platform
 import re
 import sys
+import time
 from typing import List, Optional, Tuple
 
 from escpos.exceptions import DeviceNotFoundError, USBNotFoundError
@@ -22,6 +23,12 @@ WRAP_MODES = {"hyphen", "word", "none"}
 WRAP_TOKEN_RE = re.compile(r"\S+|\s+")
 SPEED_OVERRIDE_ENV = "RP_SPEED_OVERRIDE"
 RAW_CHUNK_BYTES = 16 * 1024
+DIRECT_CONNECT_ATTEMPTS = 3
+DIRECT_CONNECT_RETRY_SECONDS = 0.25
+
+
+class PrinterUnavailableError(RuntimeError):
+    pass
 
 
 def remove_ansi(text: str) -> str:
@@ -426,7 +433,7 @@ def connect_direct_printer():
                     backend=backend,
                 )
             return p
-        except Exception as exc:
+        except (SystemExit, Exception) as exc:
             message = str(exc)
             if _permission_denied(exc):
                 usb_permission_denied = True
@@ -440,7 +447,7 @@ def connect_direct_printer():
             sys.stderr.write("USB printer matched but could not be opened, and RP_HOST is unset.\n")
         else:
             sys.stderr.write("No USB and RP_HOST unset.\n")
-        sys.exit(1)
+        raise PrinterUnavailableError("USB receipt printer is unavailable and RP_HOST is unset")
 
     p = Network(host=NETWORK_HOST, profile=PRINTER_PROFILE)
     p.charcode(CHARCODE)
@@ -499,7 +506,17 @@ def connect_printer():
 
 
 def print_raw_bytes_direct(data: bytes, cut: bool = False) -> None:
-    printer = _connect_locked_direct_printer()
+    printer = None
+    for attempt in range(DIRECT_CONNECT_ATTEMPTS):
+        try:
+            printer = _connect_locked_direct_printer()
+            break
+        except PrinterUnavailableError:
+            if attempt + 1 == DIRECT_CONNECT_ATTEMPTS:
+                raise
+            time.sleep(DIRECT_CONNECT_RETRY_SECONDS)
+    if printer is None:
+        raise PrinterUnavailableError("USB receipt printer is unavailable")
     try:
         raw = getattr(printer, "_raw", None)
         if not callable(raw):
