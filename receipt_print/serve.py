@@ -79,8 +79,15 @@ def _device_process(data: bytes, connection) -> None:
     try:
         print_raw_bytes_direct(data, cut=False)
     except BaseException as exc:
+        if isinstance(exc, SystemExit):
+            error = (
+                RuntimeError.__name__,
+                f"printer backend exited unexpectedly with status {exc.code}",
+            )
+        else:
+            error = (type(exc).__name__, str(exc))
         try:
-            connection.send((type(exc).__name__, str(exc)))
+            connection.send(error)
         finally:
             connection.close()
         raise

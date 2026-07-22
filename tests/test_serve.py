@@ -565,6 +565,29 @@ def test_device_process_reports_failure(monkeypatch):
     assert sent == [("OSError", "printer unavailable")]
 
 
+def test_device_process_reports_system_exit_as_backend_failure(monkeypatch):
+    sent = []
+
+    class Connection:
+        def send(self, value):
+            sent.append(value)
+
+        def close(self):
+            return None
+
+    def fail(*_args, **_kwargs):
+        raise SystemExit(1)
+
+    monkeypatch.setattr("receipt_print.serve.print_raw_bytes_direct", fail)
+
+    with pytest.raises(SystemExit):
+        serve_module._device_process(b"receipt", Connection())
+
+    assert sent == [
+        ("RuntimeError", "printer backend exited unexpectedly with status 1")
+    ]
+
+
 def test_healthz_is_not_ready_when_configured_device_is_missing(
     http_server, monkeypatch
 ):
