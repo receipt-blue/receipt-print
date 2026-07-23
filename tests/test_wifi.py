@@ -3,12 +3,17 @@ from escpos.escpos import QR_ECLEVEL_M
 
 from receipt_print import cli as cli_module
 from receipt_print.wifi import (
+    MacosWifiProfile,
     NetworkManagerProfile,
     WifiNetwork,
     build_wifi_panel,
     build_wifi_qr_payload,
+    list_macos_wifi_profiles,
     list_nmcli_wifi_profiles,
+    macos_wifi_device,
     parse_nmcli_connection_line,
+    read_macos_wifi_password,
+    wifi_network_from_macos_profile,
     wifi_network_from_nmcli_profile,
 )
 
@@ -232,6 +237,93 @@ def test_cli_wifi_manual_prompts_for_password(monkeypatch):
         4,
         QR_ECLEVEL_M,
     ) in printer.calls
+
+
+def test_macos_wifi_device_parses_hardware_ports():
+    def runner(args):
+        assert args == ["-listallhardwareports"]
+        return "\n".join(
+            [
+                "Hardware Port: Ethernet",
+                "Device: en4",
+                "",
+                "Hardware Port: Wi-Fi",
+                "Device: en0",
+                "Ethernet Address: aa:bb:cc:dd:ee:ff",
+            ]
+        )
+
+    assert macos_wifi_device(runner) == "en0"
+
+
+def test_list_macos_wifi_profiles_parses_preferred_networks():
+    def runner(args):
+        if args == ["-listallhardwareports"]:
+            return "Hardware Port: Wi-Fi\nDevice: en0\n"
+        assert args == ["-listpreferredwirelessnetworks", "en0"]
+        return "\n".join(
+            [
+                "Preferred networks on en0:",
+                f"\t{TEST_SSID}",
+                "\tGuest",
+            ]
+        )
+
+    profiles = list_macos_wifi_profiles(runner)
+
+    assert profiles == [
+        MacosWifiProfile(ssid=TEST_SSID),
+        MacosWifiProfile(ssid="Guest"),
+    ]
+
+
+def test_read_macos_wifi_password_returns_stored_password():
+    def runner(args):
+        assert args == [
+            "find-generic-password",
+            "-D",
+            "AirPort network password",
+            "-a",
+            TEST_SSID,
+            "-w",
+        ]
+        return f"{TEST_PASSWORD}\n"
+
+    assert read_macos_wifi_password(TEST_SSID, runner) == TEST_PASSWORD
+
+
+def test_wifi_network_from_macos_profile_with_password_is_wpa():
+    profile = MacosWifiProfile(ssid=TEST_SSID)
+
+    def runner(args):
+        return TEST_PASSWORD
+
+    network = wifi_network_from_macos_profile(profile, runner)
+
+    assert network == WifiNetwork(
+        ssid=TEST_SSID,
+        password=TEST_PASSWORD,
+        security="WPA",
+        hidden=False,
+        profile_name=TEST_SSID,
+    )
+
+
+def test_wifi_network_from_macos_profile_without_password_is_open():
+    profile = MacosWifiProfile(ssid="Guest")
+
+    def runner(args):
+        return ""
+
+    network = wifi_network_from_macos_profile(profile, runner)
+
+    assert network == WifiNetwork(
+        ssid="Guest",
+        password="",
+        security="nopass",
+        hidden=False,
+        profile_name="Guest",
+    )
 
 
 def test_cli_wifi_without_ssid_uses_stored_profile_selector(monkeypatch):

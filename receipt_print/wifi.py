@@ -2,7 +2,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, TypeVar
 
 from escpos.escpos import QR_ECLEVEL_M
 
@@ -38,7 +38,15 @@ class NetworkManagerProfile:
     hidden: bool
 
 
+@dataclass(frozen=True)
+class MacosWifiProfile:
+    ssid: str
+
+
+T = TypeVar("T")
+
 NmcliRunner = Callable[[Sequence[str], bool], str]
+MacRunner = Callable[[Sequence[str]], str]
 
 SECURITY_ALIASES = {
     "wpa": "WPA",
@@ -182,8 +190,16 @@ def print_wifi_card(
 
 
 def select_stored_wifi_network() -> WifiNetwork:
+    if sys.platform == "darwin":
+        profiles = list_macos_wifi_profiles()
+        if not profiles:
+            raise WifiError("No stored Wi-Fi networks were found.")
+        profile = pick_macos_profile(profiles)
+        return wifi_network_from_macos_profile(profile)
     if sys.platform != "linux":
-        raise WifiError("Stored Wi-Fi profile selection is only supported on Linux.")
+        raise WifiError(
+            "Stored Wi-Fi profile selection is only supported on Linux and macOS."
+        )
     profiles = list_nmcli_wifi_profiles()
     if not profiles:
         raise WifiError("No stored NetworkManager Wi-Fi profiles were found.")
@@ -285,18 +301,19 @@ def read_nmcli_password(uuid: str, field: str, runner: NmcliRunner = None) -> st
 
 
 def pick_nmcli_profile(profiles: Sequence[NetworkManagerProfile]) -> NetworkManagerProfile:
+    return pick_from_labels(profile_labels(profiles))
+
+
+def pick_from_labels(labels: Dict[str, T]) -> T:
     if shutil.which("fzf"):
-        picked = pick_nmcli_profile_fzf(profiles)
+        picked = pick_from_labels_fzf(labels)
         if picked is not None:
             return picked
         raise WifiError("No Wi-Fi profile selected.")
-    return pick_nmcli_profile_numbered(profiles)
+    return pick_from_labels_numbered(labels)
 
 
-def pick_nmcli_profile_fzf(
-    profiles: Sequence[NetworkManagerProfile],
-) -> Optional[NetworkManagerProfile]:
-    labels = profile_labels(profiles)
+def pick_from_labels_fzf(labels: Dict[str, T]) -> Optional[T]:
     proc = subprocess.run(
         ["fzf", "--prompt=Wi-Fi profile> ", "--height=40%", "--layout=reverse"],
         input="\n".join(labels.keys()) + "\n",
@@ -309,11 +326,9 @@ def pick_nmcli_profile_fzf(
     return labels.get(selection)
 
 
-def pick_nmcli_profile_numbered(
-    profiles: Sequence[NetworkManagerProfile],
-) -> NetworkManagerProfile:
-    labels = list(profile_labels(profiles).items())
-    for idx, (label, _) in enumerate(labels, start=1):
+def pick_from_labels_numbered(labels: Dict[str, T]) -> T:
+    items = list(labels.items())
+    for idx, (label, _) in enumerate(items, start=1):
         click_label = label.split("\t", 1)[1] if "\t" in label else label
         sys.stderr.write(f"{idx}. {click_label}\n")
     while True:
@@ -323,8 +338,8 @@ def pick_nmcli_profile_numbered(
         except ValueError:
             sys.stderr.write("Enter a profile number.\n")
             continue
-        if 1 <= choice <= len(labels):
-            return labels[choice - 1][1]
+        if 1 <= choice <= len(items):
+            return items[choice - 1][1]
         sys.stderr.write("Profile number out of range.\n")
 
 
@@ -378,6 +393,108 @@ def run_nmcli(args: Sequence[str], include_passwords: bool = False) -> str:
         if include_passwords:
             message = "nmcli failed while reading a stored Wi-Fi password"
         raise WifiError(message) from exc
+    return proc.stdout
+
+
+def list_macos_wifi_profiles(runner: MacRunner = None) -> List[MacosWifiProfile]:
+    run = runner or run_networksetup
+    device = macos_wifi_device(run)
+    output = run(["-listpreferredwirelessnetworks", device])
+    profiles: List[MacosWifiProfile] = []
+    for line in output.splitlines()[1:]:
+        ssid = line.strip()
+        if ssid:
+            profiles.append(MacosWifiProfile(ssid=ssid))
+    return profiles
+
+
+def macos_wifi_device(runner: MacRunner = None) -> str:
+    run = runner or run_networksetup
+    lines = run(["-listallhardwareports"]).splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip() == "Hardware Port: Wi-Fi":
+            for next_line in lines[idx + 1 :]:
+                if next_line.startswith("Device:"):
+                    return next_line.split(":", 1)[1].strip()
+    raise WifiError("No Wi-Fi hardware port was found.")
+
+
+def wifi_network_from_macos_profile(
+    profile: MacosWifiProfile, runner: MacRunner = None
+) -> WifiNetwork:
+    password = read_macos_wifi_password(profile.ssid, runner)
+    security = "WPA" if password else "nopass"
+    return WifiNetwork(
+        ssid=profile.ssid,
+        password=password,
+        security=security,
+        hidden=False,
+        profile_name=profile.ssid,
+    )
+
+
+def read_macos_wifi_password(ssid: str, runner: MacRunner = None) -> str:
+    run = runner or run_security
+    output = run(
+        ["find-generic-password", "-D", "AirPort network password", "-a", ssid, "-w"]
+    )
+    return output.strip()
+
+
+def macos_profile_labels(
+    profiles: Sequence[MacosWifiProfile],
+) -> Dict[str, MacosWifiProfile]:
+    labels: Dict[str, MacosWifiProfile] = {}
+    for idx, profile in enumerate(profiles, start=1):
+        labels[f"{idx}\t{profile.ssid}"] = profile
+    return labels
+
+
+def pick_macos_profile(profiles: Sequence[MacosWifiProfile]) -> MacosWifiProfile:
+    return pick_from_labels(macos_profile_labels(profiles))
+
+
+def run_networksetup(args: Sequence[str]) -> str:
+    command = ["networksetup", *args]
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise WifiError(
+            "networksetup is required for stored Wi-Fi profile selection."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        message = exc.stderr.strip() or exc.stdout.strip() or "networksetup failed"
+        raise WifiError(message) from exc
+    return proc.stdout
+
+
+def run_security(args: Sequence[str]) -> str:
+    command = ["security", *args]
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise WifiError(
+            "security is required for stored Wi-Fi password lookup."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 44:
+            return ""
+        message = exc.stderr.strip() or exc.stdout.strip() or "security failed"
+        raise WifiError(
+            f"security failed while reading a stored Wi-Fi password: {message}"
+        ) from exc
     return proc.stdout
 
 
