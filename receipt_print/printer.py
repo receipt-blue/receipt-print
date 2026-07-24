@@ -195,9 +195,18 @@ def should_cut(no_cut: bool = False) -> bool:
     return not no_cut
 
 
-def maybe_cut(printer, no_cut: bool = False) -> None:
-    if should_cut(no_cut):
+def cut_paper(printer, partial_cut: bool = False) -> None:
+    if partial_cut:
+        printer.cut(mode="PART")
+    else:
         printer.cut()
+
+
+def maybe_cut(
+    printer, no_cut: bool = False, partial_cut: bool = False
+) -> None:
+    if should_cut(no_cut):
+        cut_paper(printer, partial_cut=partial_cut)
 
 
 def _resolve_speed() -> Optional[int]:
@@ -548,6 +557,7 @@ def print_text(
     text: str,
     no_cut: bool = False,
     *,
+    partial_cut: bool = False,
     text_width: Optional[int] = None,
     text_height: Optional[int] = None,
     wrap_mode: str = "hyphen",
@@ -581,13 +591,19 @@ def print_text(
     if size:
         printer.set(normal_textsize=True)
     if should_cut(no_cut):
-        printer.cut()
+        maybe_cut(printer, partial_cut=partial_cut)
     elif not wrapped_text.endswith("\n"):
         printer.text("\n")
     printer.close()
 
 
-def cat_files(files: List[str], no_cut: bool = False, *, wrap_mode: str = "hyphen"):
+def cat_files(
+    files: List[str],
+    no_cut: bool = False,
+    *,
+    partial_cut: bool = False,
+    wrap_mode: str = "hyphen",
+):
     buf = []
     for f in files:
         try:
@@ -596,4 +612,6 @@ def cat_files(files: List[str], no_cut: bool = False, *, wrap_mode: str = "hyphe
         except Exception as e:
             sys.stderr.write(f"Error reading {f}: {e}\n")
             sys.exit(1)
-    print_text("".join(buf), no_cut=no_cut, wrap_mode=wrap_mode)
+    print_text(
+        "".join(buf), no_cut=no_cut, partial_cut=partial_cut, wrap_mode=wrap_mode
+    )

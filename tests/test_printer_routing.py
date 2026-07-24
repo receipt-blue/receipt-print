@@ -1,3 +1,6 @@
+from click.testing import CliRunner
+
+from receipt_print import cli as cli_module
 from receipt_print import printer as printer_module
 
 
@@ -28,6 +31,7 @@ class RecordingPrinter:
     def __init__(self):
         self.texts = []
         self.cuts = 0
+        self.cut_modes = []
         self.closed = 0
 
     def set(self, **_kwargs):
@@ -36,8 +40,9 @@ class RecordingPrinter:
     def text(self, value):
         self.texts.append(value)
 
-    def cut(self):
+    def cut(self, mode=None):
         self.cuts += 1
+        self.cut_modes.append(mode)
 
     def close(self):
         self.closed += 1
@@ -205,3 +210,38 @@ def test_no_cut_text_does_not_add_a_second_line_feed(monkeypatch):
     assert physical.texts == ["hello\n"]
     assert physical.cuts == 0
     assert physical.closed == 1
+
+
+def test_partial_cut_text_uses_partial_escpos_mode(monkeypatch):
+    physical = RecordingPrinter()
+    monkeypatch.setattr(printer_module, "connect_printer", lambda: physical)
+
+    printer_module.print_text("hello", partial_cut=True)
+
+    assert physical.cut_modes == ["PART"]
+    assert physical.closed == 1
+
+
+def test_cli_partial_cut_uses_partial_escpos_mode(monkeypatch):
+    physical = RecordingPrinter()
+    monkeypatch.setattr(printer_module, "connect_printer", lambda: physical)
+
+    result = CliRunner().invoke(
+        cli_module.cli, ["text", "--partial-cut", "hello"]
+    )
+
+    assert result.exit_code == 0
+    assert physical.cut_modes == ["PART"]
+
+
+def test_cli_partial_cut_is_mutually_exclusive_with_no_cut(monkeypatch):
+    physical = RecordingPrinter()
+    monkeypatch.setattr(cli_module, "connect_printer", lambda: physical)
+
+    result = CliRunner().invoke(
+        cli_module.cli, ["text", "--no-cut", "--partial-cut", "hello"]
+    )
+
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+    assert physical.closed == 0

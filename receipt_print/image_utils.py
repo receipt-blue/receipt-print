@@ -10,7 +10,7 @@ from escpos.exceptions import ImageWidthError
 from PIL import Image, ImageEnhance, ImageOps
 
 from .multitone import print_multitone_image
-from .printer import CHAR_WIDTH, DOTS_PER_LINE, MAX_LINES, wrap_text
+from .printer import CHAR_WIDTH, DOTS_PER_LINE, MAX_LINES, cut_paper, wrap_text
 
 
 def parse_caption_csv(captions_str: Optional[str]) -> List[str]:
@@ -232,6 +232,7 @@ def print_images_from_pil(
     auto_orient: bool = False,
     cut_between: bool = False,
     no_cut: bool = False,
+    partial_cut: bool = False,
     wrap_mode: str = "hyphen",
 ) -> int:
     """print pre-loaded PIL images and return next caption index"""
@@ -483,7 +484,7 @@ def print_images_from_pil(
 
         if cut_between:
             if not no_cut:
-                printer.cut()
+                cut_paper(printer, partial_cut=partial_cut)
             printer.set(align="left")
 
     if footer_text and not cut_between:

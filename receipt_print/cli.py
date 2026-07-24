@@ -52,6 +52,7 @@ from .printer import (
     CHAR_WIDTH,
     cat_files,
     connect_printer,
+    cut_paper,
     count_lines,
     env_no_cut,
     maybe_cut,
@@ -298,17 +299,25 @@ def parse_comma_separated(value, converter, validator=None):
     return items
 
 
-def resolve_no_cut(ctx: Optional[click.Context], no_cut: bool) -> bool:
-    if env_no_cut():
-        return True
-    if no_cut:
+def _option_enabled(ctx: Optional[click.Context], option_name: str, value: bool) -> bool:
+    if value:
         return True
     parent = ctx.parent if ctx else None
     while parent:
-        if parent.params.get("no_cut"):
+        if parent.params.get(option_name):
             return True
         parent = parent.parent
     return False
+
+
+def resolve_cut_mode(
+    ctx: Optional[click.Context], no_cut: bool, partial_cut: bool
+) -> Tuple[bool, bool]:
+    no_cut_requested = _option_enabled(ctx, "no_cut", no_cut)
+    partial_cut_requested = _option_enabled(ctx, "partial_cut", partial_cut)
+    if no_cut_requested and partial_cut_requested:
+        raise click.UsageError("--no-cut is mutually exclusive with --partial-cut.")
+    return env_no_cut() or no_cut_requested, partial_cut_requested
 
 
 def resolve_wrap(ctx: Optional[click.Context], wrap: Optional[str]) -> str:
@@ -402,6 +411,16 @@ def add_no_cut_option(func):
         "--no-cut",
         is_flag=True,
         help="Skip cutting the paper after printing.",
+        cls=GroupedOption,
+        group=OUTPUT_GROUP,
+    )(func)
+
+
+def add_partial_cut_option(func):
+    return click.option(
+        "--partial-cut",
+        is_flag=True,
+        help="Partially cut the paper after printing.",
         cls=GroupedOption,
         group=OUTPUT_GROUP,
     )(func)
@@ -1069,7 +1088,7 @@ def print_arena_block(
 
     if manual_cut_after_block:
         if not job.no_cut:
-            job.printer.cut()
+            cut_paper(job.printer, partial_cut=job.partial_cut)
         job.printer.set(align="left")
     elif not cut_between:
         job.line_break(1 if qr_cfg.enabled else 2)
@@ -1096,6 +1115,7 @@ def print_with_images(
     names=None,
     heading=None,
     no_cut: bool = False,
+    partial_cut: bool = False,
 ):
     """Print images with common workflow"""
     printer = connect_printer()
@@ -1138,10 +1158,11 @@ def print_with_images(
         multitone_diffusion=config.multitone_diffusion,
         wrap_mode=config.wrap_mode,
         no_cut=no_cut,
+        partial_cut=partial_cut,
     )
 
     if config.tile <= 1:
-        maybe_cut(printer, no_cut=no_cut)
+        maybe_cut(printer, no_cut=no_cut, partial_cut=partial_cut)
     printer.close()
 
 
@@ -1183,6 +1204,7 @@ def render_markdown_image(markdown_text: str, spacing: int, scale: float) -> Ima
 @click.group(cls=GroupedGroup, invoke_without_command=True)
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.option(
     "--speed",
     type=click.IntRange(0, 255),
@@ -1193,15 +1215,19 @@ def render_markdown_image(markdown_text: str, spacing: int, scale: float) -> Ima
     group=OUTPUT_GROUP,
 )
 @click.pass_context
-def cli(ctx, wrap, no_cut, speed):
+def cli(ctx, wrap, no_cut, partial_cut, speed):
     """Print text or images to a receipt printer."""
     if speed is not None:
         os.environ["RP_SPEED_OVERRIDE"] = str(speed)
     if ctx.invoked_subcommand is None:
         if not sys.stdin.isatty():
+            effective_no_cut, effective_partial_cut = resolve_cut_mode(
+                ctx, no_cut, partial_cut
+            )
             print_text(
                 sys.stdin.read(),
-                no_cut=resolve_no_cut(ctx, no_cut),
+                no_cut=effective_no_cut,
+                partial_cut=effective_partial_cut,
                 wrap_mode=resolve_wrap(ctx, wrap),
             )
         else:
@@ -1239,8 +1265,9 @@ def cli(ctx, wrap, no_cut, speed):
 )
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.pass_context
-def text(ctx, text, lines, size, text_width, text_height, wrap, no_cut):
+def text(ctx, text, lines, size, text_width, text_height, wrap, no_cut, partial_cut):
     """Print literal text."""
     if size is not None and (text_width is not None or text_height is not None):
         raise click.UsageError("--size is mutually exclusive with --width/--height.")
@@ -1250,9 +1277,11 @@ def text(ctx, text, lines, size, text_width, text_height, wrap, no_cut):
     size_active = text_width is not None or text_height is not None
     use_lines = lines or (size_active and len(text) > 1)
     txt = "\n".join(text) if use_lines else " ".join(text)
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
     print_text(
         txt,
-        no_cut=resolve_no_cut(ctx, no_cut),
+        no_cut=effective_no_cut,
+        partial_cut=effective_partial_cut,
         text_width=text_width,
         text_height=text_height,
         wrap_mode=resolve_wrap(ctx, wrap),
@@ -1263,12 +1292,15 @@ def text(ctx, text, lines, size, text_width, text_height, wrap, no_cut):
 @click.argument("files", nargs=-1, required=True)
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.pass_context
-def cat(ctx, files, wrap, no_cut):
+def cat(ctx, files, wrap, no_cut, partial_cut):
     """Print files' contents."""
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
     cat_files(
         files,
-        no_cut=resolve_no_cut(ctx, no_cut),
+        no_cut=effective_no_cut,
+        partial_cut=effective_partial_cut,
         wrap_mode=resolve_wrap(ctx, wrap),
     )
 
@@ -1303,13 +1335,16 @@ def count(ctx, files, wrap):
 @click.option("--no-wrap", is_flag=True, help="Standard capture instead of PTY wrap.")
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.pass_context
-def shell(ctx, commands, no_wrap, wrap, no_cut):
+def shell(ctx, commands, no_wrap, wrap, no_cut, partial_cut):
     """Run shell commands and print output."""
     out = run_shell_commands(commands, wrap_tty=not no_wrap, columns=CHAR_WIDTH)
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
     print_text(
         out,
-        no_cut=resolve_no_cut(ctx, no_cut),
+        no_cut=effective_no_cut,
+        partial_cut=effective_partial_cut,
         wrap_mode=resolve_wrap(ctx, wrap),
     )
 
@@ -1354,8 +1389,9 @@ def shell(ctx, commands, no_wrap, wrap, no_cut):
     group=IMAGE_TUNING_GROUP,
 )
 @add_no_cut_option
+@add_partial_cut_option
 @click.pass_context
-def md(ctx, files, spacing, scale, dither, threshold, diffusion, no_cut):
+def md(ctx, files, spacing, scale, dither, threshold, diffusion, no_cut, partial_cut):
     """Print markdown rendered as images.
 
     Renders markdown to rasterized images for the thermal printer.
@@ -1363,7 +1399,7 @@ def md(ctx, files, spacing, scale, dither, threshold, diffusion, no_cut):
     blockquotes, and horizontal rules.
     """
     from .image_utils import apply_dither
-    effective_no_cut = resolve_no_cut(ctx, no_cut)
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
 
     if files:
         markdown_text = ""
@@ -1395,12 +1431,18 @@ def md(ctx, files, spacing, scale, dither, threshold, diffusion, no_cut):
 
     printer = connect_printer()
     printer.image(img, impl="bitImageRaster")
-    maybe_cut(printer, no_cut=effective_no_cut)
+    maybe_cut(
+        printer, no_cut=effective_no_cut, partial_cut=effective_partial_cut
+    )
     printer.close()
 
 
 def validate_tile_mode_options(
-    ctx: click.Context, tile: int, no_cut: bool, kwargs: Dict[str, Any]
+    ctx: click.Context,
+    tile: int,
+    no_cut: bool,
+    partial_cut: bool,
+    kwargs: Dict[str, Any],
 ) -> None:
     if tile <= 1:
         return
@@ -1408,7 +1450,8 @@ def validate_tile_mode_options(
     if env_no_cut():
         raise click.UsageError("RP_NO_CUT=1 disables cutting; --tile is incompatible.")
 
-    if resolve_no_cut(ctx, no_cut):
+    effective_no_cut, _ = resolve_cut_mode(ctx, no_cut, partial_cut)
+    if effective_no_cut:
         raise click.UsageError("--no-cut is mutually exclusive with --tile.")
 
     if option_supplied_on_command_line(ctx, "align"):
@@ -1440,10 +1483,13 @@ def validate_tile_mode_options(
 )
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.pass_context
-def image(ctx, files, no_cut, **kwargs):
+def image(ctx, files, no_cut, partial_cut, **kwargs):
     """Print one or more images."""
-    validate_tile_mode_options(ctx, int(kwargs.get("tile", 1)), no_cut, kwargs)
+    validate_tile_mode_options(
+        ctx, int(kwargs.get("tile", 1)), no_cut, partial_cut, kwargs
+    )
 
     img_bytes = None
     if not files:
@@ -1517,12 +1563,14 @@ def image(ctx, files, no_cut, **kwargs):
     kwargs = apply_image_preset_kwargs(kwargs)
     kwargs["wrap"] = resolve_wrap(ctx, kwargs.get("wrap"))
     config = create_image_config(**kwargs)
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
     print_with_images(
         config,
         images,
         names=names,
         heading=kwargs["heading"],
-        no_cut=resolve_no_cut(ctx, no_cut),
+        no_cut=effective_no_cut,
+        partial_cut=effective_partial_cut,
     )
 
 
@@ -1571,6 +1619,7 @@ def arena_group():
 )
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.option(
     "--video",
     type=click.Choice(["frame", "preview"]),
@@ -1667,11 +1716,14 @@ def arena_block(
     wrap,
     debug,
     no_cut,
+    partial_cut,
 ):
     """Print one or more Are.na blocks."""
     if caption and block_caption != "none":
         raise click.UsageError("--caption is mutually exclusive with --block-caption.")
-    effective_no_cut = resolve_no_cut(ctx, no_cut)
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(
+        ctx, no_cut, partial_cut
+    )
     media_opts, missing_ffmpeg = build_media_options(
         video, ffmpeg, pdf, pdf_pages, pdf_range
     )
@@ -1720,6 +1772,7 @@ def arena_block(
         debug=config.debug,
         wrap_mode=wrap_mode,
         no_cut=effective_no_cut,
+        partial_cut=effective_partial_cut,
     )
 
     if missing_ffmpeg and video == "frame":
@@ -1776,7 +1829,11 @@ def arena_block(
 
         if printed_any:
             job.print_footer()
-            maybe_cut(printer, no_cut=effective_no_cut)
+            maybe_cut(
+                printer,
+                no_cut=effective_no_cut,
+                partial_cut=effective_partial_cut,
+            )
     finally:
         printer.close()
         client.close()
@@ -1897,6 +1954,7 @@ def arena_block(
 )
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.option(
     "--qr",
     is_flag=True,
@@ -1974,6 +2032,7 @@ def arena_channel(
     wrap,
     debug,
     no_cut,
+    partial_cut,
 ):
     """Print all blocks in an Are.na channel."""
     if caption and block_caption != "none":
@@ -1982,7 +2041,9 @@ def arena_channel(
         raise click.UsageError(
             "RP_NO_CUT=1 disables cutting; --cut-between is incompatible."
         )
-    effective_no_cut = resolve_no_cut(ctx, no_cut)
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(
+        ctx, no_cut, partial_cut
+    )
     if cut_between and effective_no_cut:
         raise click.UsageError("--no-cut is mutually exclusive with --cut-between.")
     try:
@@ -2093,6 +2154,7 @@ def arena_channel(
         auto_orient=cut_mode,
         cut_between=cut_mode,
         no_cut=effective_no_cut,
+        partial_cut=effective_partial_cut,
     )
 
     if missing_ffmpeg and video == "frame":
@@ -2168,7 +2230,11 @@ def arena_channel(
 
         if not cut_mode:
             job.print_footer()
-            maybe_cut(printer, no_cut=effective_no_cut)
+            maybe_cut(
+                printer,
+                no_cut=effective_no_cut,
+                partial_cut=effective_partial_cut,
+            )
     finally:
         printer.close()
         client.close()
@@ -2187,11 +2253,14 @@ def arena_channel(
 @add_image_options
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.pass_context
-def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
+def pdf(ctx, files, format, range, pages, no_cut, partial_cut, **kwargs):
     """Print PDF files by rendering each page to images before sending them to the printer."""
     pdf_bytes = None
-    effective_no_cut = resolve_no_cut(ctx, no_cut)
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(
+        ctx, no_cut, partial_cut
+    )
     if not files:
         if not sys.stdin.isatty():
             data = sys.stdin.buffer.read()
@@ -2252,7 +2321,12 @@ def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
                 os.unlink(tmp_path)
         else:
             txt = pdf_to_text(files, page_filter)
-        print_text(txt, no_cut=effective_no_cut, wrap_mode=wrap_mode)
+        print_text(
+            txt,
+            no_cut=effective_no_cut,
+            partial_cut=effective_partial_cut,
+            wrap_mode=wrap_mode,
+        )
         return
 
     from .pdf_utils import pdf_to_images
@@ -2311,6 +2385,7 @@ def pdf(ctx, files, format, range, pages, no_cut, **kwargs):
         names=names,
         heading=kwargs["heading"],
         no_cut=effective_no_cut,
+        partial_cut=effective_partial_cut,
     )
 
 
@@ -2377,6 +2452,7 @@ for param in pdf.params:
 )
 @add_wrap_option
 @add_no_cut_option
+@add_partial_cut_option
 @click.pass_context
 def wifi(
     ctx,
@@ -2389,6 +2465,7 @@ def wifi(
     correction,
     wrap,
     no_cut,
+    partial_cut,
 ):
     """Print a phone-scannable Wi-Fi QR code."""
     if ssid is not None:
@@ -2441,7 +2518,14 @@ def wifi(
             ec=ec,
             print_password=not omit_password,
         )
-        maybe_cut(printer, no_cut=resolve_no_cut(ctx, no_cut))
+        effective_no_cut, effective_partial_cut = resolve_cut_mode(
+            ctx, no_cut, partial_cut
+        )
+        maybe_cut(
+            printer,
+            no_cut=effective_no_cut,
+            partial_cut=effective_partial_cut,
+        )
     except WifiError as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
@@ -2467,10 +2551,13 @@ def wifi(
     group=QR_GROUP,
 )
 @add_no_cut_option
+@add_partial_cut_option
 @click.pass_context
-def qr(ctx, data, size, correction, no_cut):
+def qr(ctx, data, size, correction, no_cut, partial_cut):
     """Print QR codes."""
-    effective_no_cut = resolve_no_cut(ctx, no_cut)
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(
+        ctx, no_cut, partial_cut
+    )
     ec = QR_LEVELS.get(correction, QR_ECLEVEL_M)
     printer = connect_printer()
     printer.set(align="center")
@@ -2479,7 +2566,9 @@ def qr(ctx, data, size, correction, no_cut):
             printer.qr(item, size=size, ec=ec)
         except Exception as exc:
             sys.stderr.write(f"Error printing QR for {item}: {exc}\n")
-    maybe_cut(printer, no_cut=effective_no_cut)
+    maybe_cut(
+        printer, no_cut=effective_no_cut, partial_cut=effective_partial_cut
+    )
     printer.close()
 
 

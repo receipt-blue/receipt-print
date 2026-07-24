@@ -475,6 +475,7 @@ class ArenaPrintJob:
         auto_orient: bool = False,
         cut_between: bool = False,
         no_cut: bool = False,
+        partial_cut: bool = False,
     ):
         self.printer = printer
         self.scales = scales or [1.0]
@@ -500,6 +501,7 @@ class ArenaPrintJob:
         self.auto_orient_images = auto_orient
         self.cut_between_images = cut_between
         self.no_cut = no_cut
+        self.partial_cut = partial_cut
 
     def _wrap_and_count(
         self, text: str, width_mult: int = 1, height_mult: int = 1
@@ -647,6 +649,7 @@ class ArenaPrintJob:
             auto_orient=self.auto_orient_images,
             cut_between=self.cut_between_images,
             no_cut=self.no_cut,
+            partial_cut=self.partial_cut,
         )
         if captions is None:
             self.caption_index = next_caption_index
