@@ -1,3 +1,5 @@
+import io
+
 from click.testing import CliRunner
 
 from receipt_print import cli as cli_module
@@ -46,6 +48,27 @@ class RecordingPrinter:
 
     def close(self):
         self.closed += 1
+
+
+def test_line_limit_confirmation_covers_the_rest_of_the_job(monkeypatch, capsys):
+    prompts = 0
+
+    def open_tty(*_args, **_kwargs):
+        nonlocal prompts
+        prompts += 1
+        return io.StringIO("yes\n")
+
+    monkeypatch.setattr("builtins.open", open_tty)
+    printer_module.reset_line_limit_confirmation()
+
+    printer_module.enforce_line_limit(printer_module.MAX_LINES + 1)
+    printer_module.enforce_line_limit(
+        printer_module.MAX_LINES + 3000,
+        unit="image-lines",
+    )
+
+    assert prompts == 1
+    assert capsys.readouterr().out.count("without further size warnings") == 1
 
 
 def test_auto_mode_uses_service_when_ready(monkeypatch):

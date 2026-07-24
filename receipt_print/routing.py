@@ -16,6 +16,7 @@ DEFAULT_SERVICE_URL = "http://127.0.0.1:9100"
 DEFAULT_HEALTH_TIMEOUT = 0.25
 DEFAULT_LOCK_TIMEOUT = 35.0
 DEFAULT_LOCK_PATH = "/tmp/receipt-print-device.lock"
+DEFAULT_SERVICE_BATCH_BYTES = 512 * 1024
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -26,6 +27,17 @@ def _positive_float_env(name: str, default: float) -> float:
         raise RuntimeError(f"{name} must be a positive number") from exc
     if value <= 0:
         raise RuntimeError(f"{name} must be a positive number")
+    return value
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
     return value
 
 
@@ -202,13 +214,38 @@ class ServicePrinter(Dummy):
         self.charcode(charcode)
         apply_speed(self, speed)
         self._service_url = url
+        self._batch_bytes = _positive_int_env(
+            "RP_SERVICE_BATCH_BYTES", DEFAULT_SERVICE_BATCH_BYTES
+        )
         self._closed = False
+        self._failed = False
+
+    def _submit_buffer(self) -> None:
+        data = self.output
+        if not data:
+            return
+        try:
+            submit_raw(data, url=self._service_url)
+        except BaseException:
+            self._failed = True
+            raise
+        self.clear()
+
+    def flush_pending(self) -> None:
+        if self._closed:
+            raise RuntimeError("receipt-print service printer is closed")
+        if self._failed:
+            raise RuntimeError("receipt-print service printer batch failed")
+        buffered_bytes = sum(len(part) for part in self._output_list)
+        if buffered_bytes >= self._batch_bytes:
+            self._submit_buffer()
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        data = self.output
-        super().close()
-        if data:
-            submit_raw(data, url=self._service_url)
+        try:
+            if not self._failed:
+                self._submit_buffer()
+        finally:
+            super().close()

@@ -25,6 +25,7 @@ SPEED_OVERRIDE_ENV = "RP_SPEED_OVERRIDE"
 RAW_CHUNK_BYTES = 16 * 1024
 DIRECT_CONNECT_ATTEMPTS = 3
 DIRECT_CONNECT_RETRY_SECONDS = 0.25
+_line_limit_confirmed = False
 
 
 class PrinterUnavailableError(RuntimeError):
@@ -168,21 +169,29 @@ def wrap_text(text: str, width: int, mode: Optional[str]) -> str:
     return "\n".join(wrapped_lines)
 
 
-def enforce_line_limit(n: int) -> None:
+def enforce_line_limit(n: int, unit: str = "lines") -> None:
     """Ensure the line count does not exceed the maximum without confirmation."""
-    if n <= MAX_LINES:
+    global _line_limit_confirmed
+    if n <= MAX_LINES or _line_limit_confirmed:
         return
     try:
         with open("/dev/tty") as tty:
             sys.stdout.write(
-                f"Warning: {n} lines > limit {MAX_LINES}. Continue? [y/N] "
+                f"Warning: {n} {unit} > limit {MAX_LINES}. "
+                "Continue this print job without further size warnings? [y/N] "
             )
             sys.stdout.flush()
             if tty.readline().strip().lower() not in ("y", "yes"):
                 sys.exit(1)
+            _line_limit_confirmed = True
     except Exception:
         sys.stderr.write("No TTY available; aborting.\n")
         sys.exit(1)
+
+
+def reset_line_limit_confirmation() -> None:
+    global _line_limit_confirmed
+    _line_limit_confirmed = False
 
 
 def env_no_cut() -> bool:

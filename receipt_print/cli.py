@@ -58,6 +58,7 @@ from .printer import (
     maybe_cut,
     print_raw_bytes,
     print_text,
+    reset_line_limit_confirmation,
     sanitize_output,
     scaled_char_width,
     wrap_text,
@@ -1099,9 +1100,12 @@ def compute_channel_heading(meta: Optional[Dict[str, Any]]) -> List[str]:
     if not meta:
         return []
     title = clean_heading_text(meta.get("title") or "Untitled Channel")
-    user = meta.get("user") or {}
+    user = meta.get("owner") or meta.get("user") or {}
     user_name = clean_heading_text(
-        user.get("full_name") or user.get("username") or "Unknown"
+        user.get("full_name")
+        or user.get("name")
+        or user.get("username")
+        or "Unknown"
     )
     combined = f"{user_name} / {title}".strip()
     if len(combined) <= HEADING_CHAR_WIDTH:
@@ -1217,6 +1221,7 @@ def render_markdown_image(markdown_text: str, spacing: int, scale: float) -> Ima
 @click.pass_context
 def cli(ctx, wrap, no_cut, partial_cut, speed):
     """Print text or images to a receipt printer."""
+    reset_line_limit_confirmation()
     if speed is not None:
         os.environ["RP_SPEED_OVERRIDE"] = str(speed)
     if ctx.invoked_subcommand is None:
@@ -1794,16 +1799,18 @@ def arena_block(
             try:
                 block = client.fetch_block(block_id)
             except ArenaNotFound:
-                if not os.getenv("ARENA_TOKEN"):
+                if not client.authenticated:
                     sys.stderr.write(
-                        f"Error: Unauthorized for {ident} (set ARENA_TOKEN?).\n"
+                        f"Error: Unauthorized for {ident} "
+                        "(run `contextualize auth arena` or set ARENA_ACCESS_TOKEN).\n"
                     )
                 else:
                     sys.stderr.write(f"Error: Not found: {ident}\n")
                 continue
             except ArenaUnauthorized:
                 sys.stderr.write(
-                    f"Error: Unauthorized for {ident} (set ARENA_TOKEN?).\n"
+                    f"Error: Unauthorized for {ident} "
+                    "(run `contextualize auth arena` or set ARENA_ACCESS_TOKEN).\n"
                 )
                 continue
             except ArenaError as exc:
@@ -1927,8 +1934,9 @@ def arena_block(
 )
 @click.option(
     "--limit",
+    "--max-blocks",
     type=int,
-    help="Stop after printing N blocks.",
+    help="Stop after N matching blocks; media for later blocks is not downloaded.",
     cls=GroupedOption,
     group=ARENA_CONTENT_GROUP,
 )
@@ -2105,14 +2113,20 @@ def arena_channel(
             meta_preview = client.fetch_channel_meta_by_id(ref.channel_id) or {}
     except ArenaNotFound:
         client.close()
-        if not os.getenv("ARENA_TOKEN"):
-            sys.stderr.write(f"Error: Unauthorized for {channel} (set ARENA_TOKEN?).\n")
+        if not client.authenticated:
+            sys.stderr.write(
+                f"Error: Unauthorized for {channel} "
+                "(run `contextualize auth arena` or set ARENA_ACCESS_TOKEN).\n"
+            )
         else:
             sys.stderr.write(f"Error: Not found: {channel}\n")
         sys.exit(1)
     except ArenaUnauthorized:
         client.close()
-        sys.stderr.write(f"Error: Unauthorized for {channel} (set ARENA_TOKEN?).\n")
+        sys.stderr.write(
+            f"Error: Unauthorized for {channel} "
+            "(run `contextualize auth arena` or set ARENA_ACCESS_TOKEN).\n"
+        )
         sys.exit(1)
     except ArenaError as exc:
         client.close()
@@ -2211,6 +2225,9 @@ def arena_channel(
             )
             if success:
                 printed_blocks += 1
+                flush_pending = getattr(printer, "flush_pending", None)
+                if callable(flush_pending):
+                    flush_pending()
                 if limit_val and printed_blocks >= limit_val:
                     break
 

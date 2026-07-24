@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
@@ -29,9 +29,10 @@ from .printer import (
 )
 
 USER_AGENT = "receipt-print/0.0.1 (+https://github.com/jmpaz/receipt-print)"
-DEFAULT_API_BASE = os.getenv("ARENA_API_BASE", "https://api.are.na/v2")
+DEFAULT_API_BASE = os.getenv("ARENA_API_BASE", "https://api.are.na/v3")
 JSON_TIMEOUT = 20
 MEDIA_TIMEOUT = 60
+CONTEXTUALIZE_ARENA_TOKEN_IDENTITY = "arena-user:active"
 
 
 class ArenaError(Exception):
@@ -74,8 +75,64 @@ def default_cache_dir() -> Path:
     return (base / "receipt-print" / "arena").expanduser()
 
 
+def contextualize_arena_cache_dir() -> Path:
+    override = os.getenv("CONTEXTUALIZE_ARENA_CACHE")
+    if override:
+        return Path(override).expanduser()
+    return Path("~/.local/share/contextualize/cache/arena/v1").expanduser()
+
+
 def _hash_key(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _load_dotenv() -> None:
+    try:
+        from dotenv import find_dotenv, load_dotenv
+
+        env_path = find_dotenv(usecwd=True)
+        if env_path:
+            load_dotenv(env_path, override=False)
+    except Exception:
+        return
+
+
+def _contextualize_cached_access_token(min_valid_seconds: int = 60) -> Optional[str]:
+    digest = _hash_key(CONTEXTUALIZE_ARENA_TOKEN_IDENTITY)
+    token_dir = contextualize_arena_cache_dir() / "token"
+    content_path = token_dir / f"{digest}.json"
+    metadata_path = token_dir / f"{digest}.meta.json"
+    try:
+        payload = json.loads(content_path.read_text(encoding="utf-8"))
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(metadata, dict):
+        return None
+    if metadata.get("cache_version", 1) != 1:
+        return None
+    expires_at = metadata.get("expires_at")
+    if not isinstance(expires_at, str):
+        return None
+    try:
+        expiration = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if expiration <= datetime.now(timezone.utc) + timedelta(seconds=min_valid_seconds):
+        return None
+    token = payload.get("access_token")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    return token.strip()
+
+
+def resolve_arena_access_token() -> Optional[str]:
+    _load_dotenv()
+    for variable in ("ARENA_ACCESS_TOKEN", "ARENA_TOKEN"):
+        token = (os.getenv(variable) or "").strip()
+        if token:
+            return token
+    return _contextualize_cached_access_token()
 
 
 def parse_block_identifier(value: str) -> str:
@@ -122,19 +179,36 @@ def parse_channel_identifier(value: str) -> ChannelRef:
 
 
 def block_class(block: Dict[str, Any]) -> str:
-    return (block.get("class") or block.get("base_class") or "").lower()
+    return (
+        block.get("class")
+        or block.get("type")
+        or block.get("base_class")
+        or block.get("base_type")
+        or ""
+    ).lower()
 
 
 def block_title(block: Dict[str, Any]) -> str:
     return block.get("title") or block.get("generated_title") or ""
 
 
+def _rich_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("markdown", "plain"):
+            text = value.get(key)
+            if isinstance(text, str) and text:
+                return text
+    return ""
+
+
 def block_description(block: Dict[str, Any]) -> str:
-    return block.get("description") or ""
+    return _rich_text(block.get("description"))
 
 
 def block_text_content(block: Dict[str, Any]) -> Optional[str]:
-    content = block.get("content")
+    content = _rich_text(block.get("content"))
     if content:
         return content
     # Some blocks provide content in content_html; fall back if it's plain text.
@@ -148,18 +222,21 @@ def block_preview_urls(block: Dict[str, Any]) -> List[str]:
     urls: List[str] = []
     image = block.get("image") or {}
     if isinstance(image, dict):
-        for key in ("display", "original", "thumb"):
+        for key in ("display", "original", "large", "medium", "small", "thumb"):
             maybe = image.get(key)
             if isinstance(maybe, dict):
-                url = maybe.get("url")
+                url = maybe.get("url") or maybe.get("src")
                 if url:
                     urls.append(url)
             elif isinstance(maybe, str):
                 urls.append(maybe)
+        source = image.get("url") or image.get("src")
+        if source:
+            urls.append(source)
     thumb = block.get("thumb_url")
     if thumb:
         urls.append(thumb)
-    return urls
+    return list(dict.fromkeys(urls))
 
 
 def block_attachment(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -173,7 +250,7 @@ def block_user_name(block: Dict[str, Any]) -> Optional[str]:
     user = block.get("user") or {}
     if not isinstance(user, dict):
         return None
-    full = user.get("full_name")
+    full = user.get("full_name") or user.get("name")
     if full:
         return full
     return user.get("username")
@@ -211,7 +288,7 @@ def canonical_channel_url(
         return ref.original
     if meta:
         slug = meta.get("slug")
-        user = meta.get("user", {})
+        user = meta.get("owner") or meta.get("user") or {}
         username = user.get("slug") or user.get("username")
         if slug and username:
             return f"https://www.are.na/{username}/{slug}"
@@ -228,7 +305,8 @@ class ArenaClient:
     """HTTP client for Are.na API with caching support."""
 
     def __init__(self, cache_enabled: bool = True):
-        token = os.getenv("ARENA_TOKEN")
+        token = resolve_arena_access_token()
+        self.authenticated = token is not None
         self.base_url = DEFAULT_API_BASE.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
@@ -390,8 +468,7 @@ class ArenaClient:
     def fetch_channel_meta_by_slug(
         self, slug: str, page: int, per: int
     ) -> Dict[str, Any]:
-        params = {"page": page, "per": per}
-        return self._request_json(f"/channels/{quote(slug)}", params=params)
+        return self._request_json(f"/channels/{quote(slug)}")
 
     def fetch_channel_contents_by_id(
         self, channel_id: str, page: int, per: int
@@ -424,12 +501,13 @@ class ChannelIterator:
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         while True:
             if self.ref.slug:
-                data = self.client.fetch_channel_meta_by_slug(
+                if self.meta is None:
+                    self.meta = self.client.fetch_channel_meta_by_slug(
+                        self.ref.slug, 1, 1
+                    )
+                data = self.client.fetch_channel_contents_by_id(
                     self.ref.slug, self._page, self.per
                 )
-                if self.meta is None:
-                    self.meta = data
-                contents = data.get("contents") or []
             else:
                 data = self.client.fetch_channel_contents_by_id(
                     self.ref.channel_id, self._page, self.per
@@ -437,7 +515,11 @@ class ChannelIterator:
                 if self.meta is None:
                     meta = self.client.fetch_channel_meta_by_id(self.ref.channel_id)
                     self.meta = meta or {}
-                contents = data.get("contents", data if isinstance(data, list) else [])
+
+            contents = data.get(
+                "data",
+                data.get("contents", data if isinstance(data, list) else []),
+            )
 
             if not contents:
                 break
@@ -445,7 +527,14 @@ class ChannelIterator:
             for item in contents:
                 yield item
 
-            if len(contents) < self.per:
+            meta = data.get("meta") or {}
+            next_page = meta.get("next_page")
+            if isinstance(next_page, int):
+                self._page = next_page
+                continue
+            if meta and not meta.get("has_more_pages"):
+                break
+            if not meta and len(contents) < self.per:
                 break
             self._page += 1
 
@@ -748,7 +837,12 @@ def guess_extension(content_type: Optional[str]) -> str:
 
 
 def block_connected_at(block: Dict[str, Any]) -> Optional[datetime]:
-    ts = block.get("connected_at") or block.get("created_at")
+    connection = block.get("connection") or {}
+    ts = (
+        block.get("connected_at")
+        or connection.get("connected_at")
+        or block.get("created_at")
+    )
     return parse_timestamp(ts)
 
 

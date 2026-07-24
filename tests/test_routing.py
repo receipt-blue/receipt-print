@@ -134,6 +134,60 @@ def test_service_printer_submits_rendered_bytes(monkeypatch):
     assert seen == {"data": expected, "url": "http://printer"}
 
 
+def test_service_printer_flushes_complete_batches(monkeypatch):
+    submitted = []
+    monkeypatch.setenv("RP_SERVICE_BATCH_BYTES", "1")
+    monkeypatch.setattr(
+        "receipt_print.routing.submit_raw",
+        lambda data, **kwargs: submitted.append((data, kwargs)),
+    )
+    printer = ServicePrinter(
+        profile="TM-T20II",
+        charcode="CP437",
+        speed=None,
+        apply_speed=lambda *args: None,
+        url="http://printer",
+    )
+    printer.text("first")
+    first = printer.output
+    printer.flush_pending()
+    assert printer.output == b""
+
+    printer.text("second")
+    second = printer.output
+    printer.close()
+
+    assert submitted == [
+        (first, {"url": "http://printer"}),
+        (second, {"url": "http://printer"}),
+    ]
+
+
+def test_service_printer_does_not_resubmit_failed_batch_on_close(monkeypatch):
+    attempts = []
+    monkeypatch.setenv("RP_SERVICE_BATCH_BYTES", "1")
+
+    def fail(data, **kwargs):
+        attempts.append((data, kwargs))
+        raise RuntimeError("pipe error")
+
+    monkeypatch.setattr("receipt_print.routing.submit_raw", fail)
+    printer = ServicePrinter(
+        profile="TM-T20II",
+        charcode="CP437",
+        speed=None,
+        apply_speed=lambda *args: None,
+        url="http://printer",
+    )
+    printer.text("payload")
+
+    with pytest.raises(RuntimeError, match="pipe error"):
+        printer.flush_pending()
+    printer.close()
+
+    assert len(attempts) == 1
+
+
 def test_device_lock_serializes_and_times_out(tmp_path):
     path = tmp_path / "printer.lock"
     first = DeviceLock(str(path), timeout=1)

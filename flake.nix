@@ -38,6 +38,7 @@
             pdf2image
             pillow
             python-escpos
+            python-dotenv
             pyusb
             requests
           ];

@@ -10,7 +10,7 @@ from escpos.exceptions import ImageWidthError
 from PIL import Image, ImageEnhance, ImageOps
 
 from .multitone import print_multitone_image
-from .printer import CHAR_WIDTH, DOTS_PER_LINE, MAX_LINES, cut_paper, wrap_text
+from .printer import CHAR_WIDTH, DOTS_PER_LINE, cut_paper, enforce_line_limit, wrap_text
 
 
 def parse_caption_csv(captions_str: Optional[str]) -> List[str]:
@@ -379,18 +379,7 @@ def print_images_from_pil(
                 )
             )
 
-    if total_lines > MAX_LINES:
-        try:
-            with open("/dev/tty") as tty:
-                sys.stdout.write(
-                    f"Warning: {total_lines} image-lines > limit {MAX_LINES}. Continue? [y/N] "
-                )
-                sys.stdout.flush()
-                if tty.readline().strip().lower() not in ("y", "yes"):
-                    sys.exit(0)
-        except Exception:
-            sys.stderr.write("No TTY for confirm. Aborting.\n")
-            sys.exit(1)
+    enforce_line_limit(total_lines, unit="image-lines")
 
     for (
         im,
