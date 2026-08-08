@@ -16,6 +16,8 @@ from receipt_print.arena import (
     block_text_content,
     resolve_arena_access_token,
 )
+from receipt_print.arena_evaluate import fetch_channel_snapshot
+from receipt_print.arena_document import expected_qr_payloads, normalize_channel
 
 
 TOKEN_IDENTITY = "arena-user:active"
@@ -52,6 +54,10 @@ def test_arena_channel_exposes_max_blocks_alias():
     assert "--limit, --max-blocks INTEGER" in result.output
     assert "media for later" in result.output
     assert "blocks is not downloaded" in result.output
+    assert "--layout [paired|column|minimal|escpos]" in result.output
+    assert "--channel-qr / --no-channel-qr" in result.output
+    assert "--core-url TEXT" in result.output
+    assert "--random-seed INTEGER" in result.output
 
 
 def test_arena_channel_max_blocks_stops_before_later_media(monkeypatch):
@@ -118,6 +124,8 @@ def test_arena_channel_max_blocks_stops_before_later_media(monkeypatch):
         [
             "are.na",
             "channel",
+            "--layout",
+            "escpos",
             "--max-blocks",
             "2",
             "--no-cut",
@@ -128,6 +136,206 @@ def test_arena_channel_max_blocks_stops_before_later_media(monkeypatch):
     assert result.exit_code == 0
     assert media_blocks == [1, 2]
     assert printer.flushes == 2
+
+
+def test_arena_channel_defaults_to_core_column_full_channel_and_full_cut(
+    monkeypatch,
+):
+    calls = {}
+    value = normalize_channel(
+        {
+            "id": 7,
+            "slug": "core-channel",
+            "title": "Core Channel",
+            "owner": {"full_name": "Owner"},
+        },
+        [{"id": 1, "type": "Text", "content": "one"}],
+        "https://www.are.na/owner/core-channel",
+        fetched_at="2026-08-08T12:00:00+00:00",
+    )
+
+    class Client:
+        def __init__(self, cache_enabled=True):
+            calls["cache_enabled"] = cache_enabled
+
+        def close(self):
+            calls["arena_closed"] = True
+
+    class Core:
+        def __init__(self, url):
+            calls["core_url"] = url
+
+        def print_document(self, document):
+            calls["document"] = document
+            return {"editionId": "01TESTEDITION"}
+
+        def close(self):
+            calls["core_closed"] = True
+
+    def fetch(client, channel, *, selection, limit, seed):
+        calls["fetch"] = (channel, selection, limit, seed)
+        return value, {}
+
+    def media(client, channel):
+        calls["media"] = channel.slug
+        return {}
+
+    monkeypatch.setattr(cli_module, "ArenaClient", Client)
+    monkeypatch.setattr(cli_module, "ReceiptCoreClient", Core)
+    monkeypatch.setattr(cli_module, "fetch_channel_snapshot", fetch)
+    monkeypatch.setattr(cli_module, "collect_media", media)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["are.na", "channel", "https://www.are.na/owner/core-channel"],
+    )
+
+    assert result.exit_code == 0
+    assert calls["fetch"] == (
+        "https://www.are.na/owner/core-channel",
+        "full",
+        None,
+        None,
+    )
+    assert calls["media"] == "core-channel"
+    assert calls["document"]["realization"]["params"]["layout"] == "column"
+    assert calls["document"]["realization"]["params"]["channelQr"] is True
+    assert calls["document"]["blocks"][-1] == {"type": "cut", "kind": "full"}
+    assert "as edition 01TESTEDITION" in result.output
+
+
+def test_arena_channel_core_exposes_limit_media_and_channel_qr_controls(
+    monkeypatch,
+):
+    calls = {}
+    value = normalize_channel(
+        {
+            "id": 8,
+            "slug": "limited",
+            "title": "Limited",
+            "owner": {"full_name": "Owner"},
+        },
+        [
+            {"id": 1, "type": "Text", "content": "one"},
+            {"id": 2, "type": "Text", "content": "two"},
+        ],
+        "https://www.are.na/owner/limited",
+        fetched_at="2026-08-08T12:00:00+00:00",
+    )
+
+    class Client:
+        def __init__(self, cache_enabled=True):
+            pass
+
+        def close(self):
+            pass
+
+    class Core:
+        def __init__(self, url):
+            pass
+
+        def print_document(self, document):
+            calls["document"] = document
+            return {}
+
+        def close(self):
+            pass
+
+    def fetch(client, channel, *, selection, limit, seed):
+        calls["fetch"] = (selection, limit, seed)
+        return value, {}
+
+    def fail_media(client, channel):
+        raise AssertionError("media collection should be disabled")
+
+    monkeypatch.setattr(cli_module, "ArenaClient", Client)
+    monkeypatch.setattr(cli_module, "ReceiptCoreClient", Core)
+    monkeypatch.setattr(cli_module, "fetch_channel_snapshot", fetch)
+    monkeypatch.setattr(cli_module, "collect_media", fail_media)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "are.na",
+            "channel",
+            "--layout",
+            "paired",
+            "--max-blocks",
+            "2",
+            "--no-channel-qr",
+            "--no-media",
+            "--no-cut",
+            "https://www.are.na/owner/limited",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls["fetch"] == ("top", 2, None)
+    document = calls["document"]
+    assert document["realization"]["params"]["layout"] == "paired"
+    assert document["realization"]["params"]["channelQr"] is False
+    assert document["blocks"][-1]["type"] != "cut"
+    assert "https://www.are.na/owner/limited" not in expected_qr_payloads(document)
+
+
+def test_arena_channel_core_exposes_seeded_random_selection(monkeypatch):
+    calls = {}
+    channel = normalize_channel(
+        {"id": 9, "slug": "sampled", "title": "Sampled"},
+        [{"id": 2, "type": "Text", "content": "two"}],
+        "https://www.are.na/owner/sampled",
+        fetched_at="2026-08-08T12:00:00+00:00",
+    )
+
+    class Client:
+        def __init__(self, cache_enabled=True):
+            pass
+
+        def close(self):
+            pass
+
+    class Core:
+        def __init__(self, url):
+            pass
+
+        def print_document(self, document):
+            calls["document"] = document
+            calls["selection"] = document["realization"]["params"]["selection"]
+            return {}
+
+        def close(self):
+            pass
+
+    def fetch(client, value, *, selection, limit, seed):
+        calls["fetch"] = (selection, limit, seed)
+        return channel, {}
+
+    monkeypatch.setattr(cli_module, "ArenaClient", Client)
+    monkeypatch.setattr(cli_module, "ReceiptCoreClient", Core)
+    monkeypatch.setattr(cli_module, "fetch_channel_snapshot", fetch)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "are.na",
+            "channel",
+            "--sort",
+            "random",
+            "--max-blocks",
+            "20",
+            "--random-seed",
+            "17",
+            "--no-media",
+            "https://www.are.na/owner/sampled",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls["fetch"] == ("random", 20, 17)
+    assert calls["selection"] == "random"
+    assert calls["document"]["realization"]["params"]["order"] == (
+        "pinned_first_position_desc"
+    )
 
 
 def test_resolve_arena_access_token_prefers_contextualize_env(monkeypatch, tmp_path):
@@ -229,7 +437,8 @@ def test_channel_iterator_reads_v3_data_pages():
         def fetch_channel_meta_by_slug(self, slug, page, per):
             return {"id": 7, "slug": slug}
 
-        def fetch_channel_contents_by_id(self, channel_id, page, per):
+        def fetch_channel_contents_by_id(self, channel_id, page, per, sort):
+            assert sort == "position_desc"
             pages = {
                 1: {
                     "data": [{"id": 1}],
@@ -246,3 +455,148 @@ def test_channel_iterator_reads_v3_data_pages():
 
     assert list(iterator) == [{"id": 1}, {"id": 2}]
     assert iterator.meta == {"id": 7, "slug": "private-channel"}
+
+
+def test_top_selection_stops_on_first_page_and_preserves_api_order():
+    class Client:
+        def __init__(self):
+            self.pages = []
+
+        def fetch_channel_meta_by_slug(self, slug, page, per):
+            return {
+                "id": 7,
+                "slug": slug,
+                "title": "Ordered",
+                "owner": {"slug": "owner", "full_name": "Owner"},
+                "counts": {"contents": 8},
+            }
+
+        def fetch_channel_contents_by_id(self, channel_id, page, per, sort):
+            self.pages.append((page, sort))
+            pages = {
+                1: {
+                    "data": [
+                        {
+                            "id": item,
+                            "type": "Text",
+                            "content": str(item),
+                            "connection": {
+                                "position": 10 - item,
+                                "pinned": item == 4,
+                                "connected_at": f"2020-01-0{item + 1}T00:00:00Z",
+                            },
+                            "created_at": f"2026-01-0{item + 1}T00:00:00Z",
+                        }
+                        for item in range(5)
+                    ],
+                    "meta": {"next_page": 2, "has_more_pages": True},
+                },
+                2: {
+                    "data": [{"id": 99, "type": "Text", "content": "later"}],
+                    "meta": {"next_page": None, "has_more_pages": False},
+                },
+            }
+            return pages[page]
+
+    client = Client()
+
+    channel, source = fetch_channel_snapshot(
+        client,
+        "https://www.are.na/owner/ordered",
+        selection="top",
+        limit=None,
+    )
+
+    assert client.pages == [(1, "position_desc")]
+    assert [item.id for item in channel.blocks] == ["0", "1", "2", "3", "4"]
+    assert channel.blocks[4].placement.pinned is True
+    assert source["limit"] == 5
+
+
+def test_random_selection_samples_full_channel_and_preserves_api_order():
+    class Client:
+        def __init__(self):
+            self.pages = []
+
+        def fetch_channel_meta_by_slug(self, slug, page, per):
+            return {
+                "id": 7,
+                "slug": slug,
+                "title": "Ordered",
+                "owner": {"slug": "owner", "full_name": "Owner"},
+                "counts": {"contents": 8},
+            }
+
+        def fetch_channel_contents_by_id(self, channel_id, page, per, sort):
+            self.pages.append((page, sort))
+            pages = {
+                1: {
+                    "data": [
+                        {"id": item, "type": "Text", "content": str(item)}
+                        for item in range(5)
+                    ],
+                    "meta": {"next_page": 2, "has_more_pages": True},
+                },
+                2: {
+                    "data": [
+                        {
+                            "id": item,
+                            "type": "Text",
+                            "content": str(item),
+                            "connection": {"pinned": item == 6},
+                        }
+                        for item in range(5, 8)
+                    ],
+                    "meta": {"next_page": None, "has_more_pages": False},
+                },
+            }
+            return pages[page]
+
+    client = Client()
+
+    channel, source = fetch_channel_snapshot(
+        client,
+        "https://www.are.na/owner/ordered",
+        selection="random",
+        limit=3,
+        seed=17,
+    )
+
+    assert client.pages == [(1, "position_desc"), (2, "position_desc")]
+    assert [item.id for item in channel.blocks] == ["6", "2", "7"]
+    assert channel.blocks[0].placement.pinned is True
+    assert source["randomSeed"] == 17
+    assert source["populationCount"] == 8
+    assert source["pinOrder"] == "pinned-first"
+
+
+def test_random_selection_keeps_small_channel_complete_and_ordered():
+    class Client:
+        def fetch_channel_meta_by_slug(self, slug, page, per):
+            return {
+                "id": 7,
+                "slug": slug,
+                "title": "Small",
+                "owner": {"slug": "owner", "full_name": "Owner"},
+                "counts": {"contents": 3},
+            }
+
+        def fetch_channel_contents_by_id(self, channel_id, page, per, sort):
+            return {
+                "data": [
+                    {"id": item, "type": "Text", "content": str(item)}
+                    for item in range(3)
+                ],
+                "meta": {"next_page": None, "has_more_pages": False},
+            }
+
+    channel, source = fetch_channel_snapshot(
+        Client(),
+        "https://www.are.na/owner/small",
+        selection="random",
+        limit=20,
+        seed=17,
+    )
+
+    assert [item.id for item in channel.blocks] == ["0", "1", "2"]
+    assert source["populationCount"] == 3

@@ -9,6 +9,7 @@ import sys
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -48,6 +49,9 @@ from .arena import (
     should_include_block,
     video_frame_from_bytes,
 )
+from .arena_document import VARIANTS as ARENA_LAYOUTS
+from .arena_document import compose_channel_document
+from .arena_evaluate import collect_media, fetch_channel_snapshot
 from .printer import (
     CHAR_WIDTH,
     cat_files,
@@ -63,6 +67,7 @@ from .printer import (
     scaled_char_width,
     wrap_text,
 )
+from .receipt_core import ReceiptCoreClient, ReceiptCoreError
 from .shell import run_shell_commands
 from .wifi import (
     WifiError,
@@ -300,7 +305,9 @@ def parse_comma_separated(value, converter, validator=None):
     return items
 
 
-def _option_enabled(ctx: Optional[click.Context], option_name: str, value: bool) -> bool:
+def _option_enabled(
+    ctx: Optional[click.Context], option_name: str, value: bool
+) -> bool:
     if value:
         return True
     parent = ctx.parent if ctx else None
@@ -359,7 +366,9 @@ def validate_diffusion(value):
     return value >= 0.0
 
 
-def resolve_edge_pad(option_value: Optional[float], cli_name: str, env_name: str) -> float:
+def resolve_edge_pad(
+    option_value: Optional[float], cli_name: str, env_name: str
+) -> float:
     if option_value is not None:
         value = float(option_value)
         if not 0.0 <= value <= EDGE_PAD_MAX:
@@ -1060,7 +1069,9 @@ def print_arena_block(
             try:
                 job.printer.qr(block_url, size=qr_cfg.size, ec=qr_cfg.ec)
             except Exception as exc:
-                sys.stderr.write(f"Warning: Failed to print QR for {block_url}: {exc}\n")
+                sys.stderr.write(
+                    f"Warning: Failed to print QR for {block_url}: {exc}\n"
+                )
             job.printer.set(align="left", font="a")
 
     if not clean and not images_only:
@@ -1102,10 +1113,7 @@ def compute_channel_heading(meta: Optional[Dict[str, Any]]) -> List[str]:
     title = clean_heading_text(meta.get("title") or "Untitled Channel")
     user = meta.get("owner") or meta.get("user") or {}
     user_name = clean_heading_text(
-        user.get("full_name")
-        or user.get("name")
-        or user.get("username")
-        or "Unknown"
+        user.get("full_name") or user.get("name") or user.get("username") or "Unknown"
     )
     combined = f"{user_name} / {title}".strip()
     if len(combined) <= HEADING_CHAR_WIDTH:
@@ -1170,7 +1178,9 @@ def print_with_images(
     printer.close()
 
 
-def render_markdown_image(markdown_text: str, spacing: int, scale: float) -> Image.Image:
+def render_markdown_image(
+    markdown_text: str, spacing: int, scale: float
+) -> Image.Image:
     from .markdown_render import PRINTER_WIDTH, render_markdown_to_single_image
 
     if abs(scale - 1.0) < 1e-9:
@@ -1404,6 +1414,7 @@ def md(ctx, files, spacing, scale, dither, threshold, diffusion, no_cut, partial
     blockquotes, and horizontal rules.
     """
     from .image_utils import apply_dither
+
     effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
 
     if files:
@@ -1436,9 +1447,7 @@ def md(ctx, files, spacing, scale, dither, threshold, diffusion, no_cut, partial
 
     printer = connect_printer()
     printer.image(img, impl="bitImageRaster")
-    maybe_cut(
-        printer, no_cut=effective_no_cut, partial_cut=effective_partial_cut
-    )
+    maybe_cut(printer, no_cut=effective_no_cut, partial_cut=effective_partial_cut)
     printer.close()
 
 
@@ -1585,6 +1594,92 @@ def arena_group():
     pass
 
 
+def _core_channel_conflicts(ctx: click.Context) -> list[str]:
+    names = (
+        "method",
+        "dither",
+        "threshold",
+        "diffusion",
+        "spacing",
+        "heading",
+        "caption",
+        "block_caption",
+        "footer",
+        "clean",
+        "brightness",
+        "contrast",
+        "gamma",
+        "autocontrast",
+        "left_pad",
+        "right_pad",
+        "video",
+        "ffmpeg",
+        "pdf",
+        "pdf_pages",
+        "pdf_range",
+        "filter",
+        "exclude",
+        "since",
+        "include_channels",
+        "cut_between",
+        "wrap",
+        "debug",
+        "qr_size",
+        "qr_correction",
+    )
+    return [name for name in names if option_supplied_on_command_line(ctx, name)]
+
+
+def _print_arena_channel_via_core(
+    channel_value: str,
+    *,
+    layout: str,
+    limit: Optional[int],
+    sort: str,
+    random_seed: Optional[int],
+    channel_qr: Optional[bool],
+    core_url: Optional[str],
+    include_media: bool,
+    no_cache: bool,
+    no_cut: bool,
+    partial_cut: bool,
+) -> None:
+    arena_client = ArenaClient(cache_enabled=not no_cache)
+    core_client = ReceiptCoreClient(core_url)
+    selection = "random" if sort == "random" else "top" if limit else "full"
+    try:
+        channel, _ = fetch_channel_snapshot(
+            arena_client,
+            channel_value,
+            selection=selection,
+            limit=limit,
+            seed=random_seed,
+        )
+        media = collect_media(arena_client, channel) if include_media else {}
+        cut = None if no_cut else "partial" if partial_cut else "full"
+        document = compose_channel_document(
+            channel,
+            layout,
+            media=media,
+            channel_qr=channel_qr,
+            selection=selection,
+            cut=cut,
+        )
+        result = core_client.print_document(document)
+    except (ArenaError, ReceiptCoreError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        arena_client.close()
+        core_client.close()
+
+    edition = result.get("editionId")
+    suffix = f" as edition {edition}" if edition else ""
+    click.echo(
+        f"Printed {len(channel.blocks)} block(s) from {channel.canonical_url} "
+        f"with the {layout} layout{suffix}."
+    )
+
+
 @arena_group.command("block")
 @click.argument("blocks", nargs=-1, required=True)
 @add_core_image_options
@@ -1670,7 +1765,7 @@ def arena_group():
     "--qr-size",
     type=int,
     default=4,
-    help="QR module size (printer dependent). Default: 4.",
+    help="QR module size for --layout escpos. Default: 4.",
     cls=GroupedOption,
     group=QR_GROUP,
 )
@@ -1678,7 +1773,7 @@ def arena_group():
     "--qr-correction",
     type=click.Choice(["L", "M", "Q", "H"]),
     default="M",
-    help="QR error correction level.",
+    help="QR error correction level for --layout escpos.",
     cls=GroupedOption,
     group=QR_GROUP,
 )
@@ -1726,9 +1821,7 @@ def arena_block(
     """Print one or more Are.na blocks."""
     if caption and block_caption != "none":
         raise click.UsageError("--caption is mutually exclusive with --block-caption.")
-    effective_no_cut, effective_partial_cut = resolve_cut_mode(
-        ctx, no_cut, partial_cut
-    )
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
     media_opts, missing_ffmpeg = build_media_options(
         video, ffmpeg, pdf, pdf_pages, pdf_range
     )
@@ -1851,6 +1944,15 @@ def arena_block(
 
 @arena_group.command("channel")
 @click.argument("channel", required=True)
+@click.option(
+    "--layout",
+    type=click.Choice([*ARENA_LAYOUTS, "escpos"]),
+    default="column",
+    show_default=True,
+    help="Receipt-core layout, or escpos for the original direct-printer renderer.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
 @add_core_image_options
 @click.option(
     "--heading",
@@ -1935,7 +2037,7 @@ def arena_block(
 @click.option(
     "--limit",
     "--max-blocks",
-    type=int,
+    type=click.IntRange(min=1),
     help="Stop after N matching blocks; media for later blocks is not downloaded.",
     cls=GroupedOption,
     group=ARENA_CONTENT_GROUP,
@@ -1966,7 +2068,18 @@ def arena_block(
 @click.option(
     "--qr",
     is_flag=True,
-    help="Print a QR code of the channel URL beneath the heading.",
+    hidden=True,
+    help="Deprecated alias for --channel-qr.",
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
+@click.option(
+    "--channel-qr/--no-channel-qr",
+    default=None,
+    help=(
+        "Include the channel QR in the title lockup. By default column and "
+        "paired include it; minimal omits it."
+    ),
     cls=GroupedOption,
     group=QR_GROUP,
 )
@@ -1988,11 +2101,38 @@ def arena_block(
 )
 @click.option(
     "--sort",
-    type=click.Choice(["asc", "desc", "random"]),
-    default="desc",
-    help="Ordering for channel contents: ascending, descending, or random (default desc).",
+    type=click.Choice(["arena", "asc", "desc", "random"]),
+    default="arena",
+    show_default=True,
+    help=(
+        "Use visible Are.na order, or sample random blocks. Receipt-core random "
+        "samples retain their relative order and default to five without "
+        "--max-blocks. Ascending and descending sorts require --layout escpos."
+    ),
     cls=GroupedOption,
     group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--random-seed",
+    type=int,
+    help="Reproduce a --sort random selection.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--core-url",
+    help="Receipt-core substrate URL. Defaults to RECEIPT_CORE_URL or localhost:3080.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
+)
+@click.option(
+    "--media/--no-media",
+    "include_media",
+    default=True,
+    show_default=True,
+    help="Include available channel cover and block preview images in receipt-core layouts.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
 )
 @click.option(
     "--no-cache",
@@ -2005,6 +2145,7 @@ def arena_block(
 def arena_channel(
     ctx,
     channel,
+    layout,
     method,
     dither,
     threshold,
@@ -2033,9 +2174,13 @@ def arena_channel(
     include_channels,
     cut_between,
     qr,
+    channel_qr,
     qr_size,
     qr_correction,
     sort,
+    random_seed,
+    core_url,
+    include_media,
     no_cache,
     wrap,
     debug,
@@ -2043,15 +2188,53 @@ def arena_channel(
     partial_cut,
 ):
     """Print all blocks in an Are.na channel."""
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
+    if random_seed is not None and sort != "random":
+        raise click.UsageError("--random-seed requires --sort random.")
+    if layout != "escpos":
+        conflicts = _core_channel_conflicts(ctx)
+        if sort in {"asc", "desc"}:
+            conflicts.append("sort")
+        if conflicts:
+            options = ", ".join(f"--{name.replace('_', '-')}" for name in conflicts)
+            raise click.UsageError(
+                f"{options} apply only to --layout escpos; receipt-core layouts "
+                "own their typography and media realization."
+            )
+        if qr and channel_qr is False:
+            raise click.UsageError("--qr conflicts with --no-channel-qr.")
+        _print_arena_channel_via_core(
+            channel,
+            layout=layout,
+            limit=limit if limit and limit > 0 else None,
+            sort=sort,
+            random_seed=random_seed,
+            channel_qr=True if qr else channel_qr,
+            core_url=core_url,
+            include_media=include_media,
+            no_cache=no_cache,
+            no_cut=effective_no_cut,
+            partial_cut=effective_partial_cut,
+        )
+        return
+
+    escpos_conflicts = []
+    if option_supplied_on_command_line(ctx, "core_url"):
+        escpos_conflicts.append("--core-url")
+    if option_supplied_on_command_line(ctx, "include_media"):
+        escpos_conflicts.append("--media/--no-media")
+    if escpos_conflicts:
+        raise click.UsageError(
+            f"{', '.join(escpos_conflicts)} apply only to receipt-core layouts."
+        )
+    if channel_qr is not None:
+        qr = channel_qr
     if caption and block_caption != "none":
         raise click.UsageError("--caption is mutually exclusive with --block-caption.")
     if cut_between and env_no_cut():
         raise click.UsageError(
             "RP_NO_CUT=1 disables cutting; --cut-between is incompatible."
         )
-    effective_no_cut, effective_partial_cut = resolve_cut_mode(
-        ctx, no_cut, partial_cut
-    )
     if cut_between and effective_no_cut:
         raise click.UsageError("--no-cut is mutually exclusive with --cut-between.")
     try:
@@ -2186,9 +2369,9 @@ def arena_channel(
         return 0.0
 
     blocks = list(ChannelIterator(client, ref))
-    if sort == "random":
-        random.shuffle(blocks)
-    else:
+    if sort == "random" and (limit_val is None or len(blocks) > limit_val):
+        random.Random(random_seed).shuffle(blocks)
+    elif sort in {"asc", "desc"}:
         reverse = sort == "desc"
         blocks.sort(key=block_sort_key, reverse=reverse)
     printed_blocks = 0
@@ -2257,6 +2440,172 @@ def arena_channel(
         client.close()
 
 
+@arena_group.command("evaluate")
+@click.argument("channels", nargs=-1)
+@click.option(
+    "--snapshot",
+    "snapshots",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    multiple=True,
+    help="Replay a normalized snapshot instead of fetching a channel.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--selection",
+    type=click.Choice(["full", "top", "random"]),
+    default="full",
+    show_default=True,
+    help="Render the full channel, first items, or a random order-preserving sample.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    help="Maximum items to select; top and random selections default to five.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--random-seed",
+    type=int,
+    help="Reproduce a --selection random sample.",
+    cls=GroupedOption,
+    group=ARENA_CONTENT_GROUP,
+)
+@click.option(
+    "--variant",
+    "variants",
+    type=click.Choice(ARENA_LAYOUTS),
+    multiple=True,
+    help="Layout variant to render; repeat as needed. The default renders all.",
+    cls=GroupedOption,
+    group=IMAGE_LAYOUT_GROUP,
+)
+@click.option(
+    "--channel-qr/--no-channel-qr",
+    default=None,
+    help=(
+        "Include the channel QR in every rendered variant. Without an override, "
+        "column and paired include it while minimal omits it."
+    ),
+    cls=GroupedOption,
+    group=QR_GROUP,
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Output directory. Defaults to build/arena-evals/<timestamp>.",
+    cls=GroupedOption,
+    group=OUTPUT_GROUP,
+)
+@click.option(
+    "--core-url",
+    help="Receipt-core substrate URL. Defaults to RECEIPT_CORE_URL or localhost:3080.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
+)
+@click.option(
+    "--media/--no-media",
+    default=True,
+    show_default=True,
+    help="Download available block preview media into the reproducible document.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
+)
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    help="Bypass the local Are.na cache for this run.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
+)
+def arena_evaluate(
+    channels,
+    snapshots,
+    selection,
+    limit,
+    random_seed,
+    variants,
+    channel_qr,
+    output,
+    core_url,
+    media,
+    no_cache,
+):
+    """Render a no-ink Are.na layout bake-off through receipt-core."""
+    from .arena_document import VARIANTS
+    from .arena_evaluate import (
+        collect_media,
+        evaluate_channel,
+        fetch_channel_snapshot,
+        load_snapshot,
+    )
+    from .receipt_core import ReceiptCoreClient, ReceiptCoreError
+
+    if not channels and not snapshots:
+        raise click.UsageError("Provide at least one channel URL or --snapshot.")
+    if random_seed is not None and selection != "random":
+        raise click.UsageError("--random-seed requires --selection random.")
+    unknown = [variant for variant in variants if variant not in VARIANTS]
+    if unknown:
+        raise click.UsageError(
+            f"Unknown variant(s): {', '.join(unknown)}. Choose from {', '.join(VARIANTS)}."
+        )
+    selected_variants = variants or VARIANTS
+    run_dir = output or Path("build") / "arena-evals" / datetime.now().strftime(
+        "%Y%m%d-%H%M%S"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    arena_client = ArenaClient(cache_enabled=not no_cache)
+    core_client = ReceiptCoreClient(core_url)
+    rendered = []
+    try:
+        for channel_value in channels:
+            channel, source = fetch_channel_snapshot(
+                arena_client,
+                channel_value,
+                selection=selection,
+                limit=limit,
+                seed=random_seed,
+            )
+            media_data = collect_media(arena_client, channel) if media else {}
+            rendered.extend(
+                evaluate_channel(
+                    channel,
+                    source,
+                    core_client,
+                    run_dir,
+                    variants=selected_variants,
+                    media=media_data,
+                    channel_qr=channel_qr,
+                )
+            )
+        for snapshot in snapshots:
+            channel = load_snapshot(snapshot)
+            media_data = collect_media(arena_client, channel) if media else {}
+            rendered.extend(
+                evaluate_channel(
+                    channel,
+                    {"snapshot": str(snapshot)},
+                    core_client,
+                    run_dir,
+                    variants=selected_variants,
+                    media=media_data,
+                    channel_qr=channel_qr,
+                )
+            )
+    except (ArenaError, ReceiptCoreError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        arena_client.close()
+        core_client.close()
+
+    click.echo(f"Rendered {len(rendered)} variants to {run_dir}")
+
+
 @cli.command()
 @click.argument("files", nargs=-1)
 @click.option(
@@ -2275,9 +2624,7 @@ def arena_channel(
 def pdf(ctx, files, format, range, pages, no_cut, partial_cut, **kwargs):
     """Print PDF files by rendering each page to images before sending them to the printer."""
     pdf_bytes = None
-    effective_no_cut, effective_partial_cut = resolve_cut_mode(
-        ctx, no_cut, partial_cut
-    )
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
     if not files:
         if not sys.stdin.isatty():
             data = sys.stdin.buffer.read()
@@ -2572,9 +2919,7 @@ def wifi(
 @click.pass_context
 def qr(ctx, data, size, correction, no_cut, partial_cut):
     """Print QR codes."""
-    effective_no_cut, effective_partial_cut = resolve_cut_mode(
-        ctx, no_cut, partial_cut
-    )
+    effective_no_cut, effective_partial_cut = resolve_cut_mode(ctx, no_cut, partial_cut)
     ec = QR_LEVELS.get(correction, QR_ECLEVEL_M)
     printer = connect_printer()
     printer.set(align="center")
@@ -2583,9 +2928,7 @@ def qr(ctx, data, size, correction, no_cut, partial_cut):
             printer.qr(item, size=size, ec=ec)
         except Exception as exc:
             sys.stderr.write(f"Error printing QR for {item}: {exc}\n")
-    maybe_cut(
-        printer, no_cut=effective_no_cut, partial_cut=effective_partial_cut
-    )
+    maybe_cut(printer, no_cut=effective_no_cut, partial_cut=effective_partial_cut)
     printer.close()
 
 

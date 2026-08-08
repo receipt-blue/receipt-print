@@ -471,9 +471,13 @@ class ArenaClient:
         return self._request_json(f"/channels/{quote(slug)}")
 
     def fetch_channel_contents_by_id(
-        self, channel_id: str, page: int, per: int
+        self,
+        channel_id: str,
+        page: int,
+        per: int,
+        sort: str = "position_desc",
     ) -> Dict[str, Any]:
-        params = {"page": page, "per": per}
+        params = {"page": page, "per": per, "sort": sort}
         return self._request_json(
             f"/channels/{quote(channel_id)}/contents", params=params
         )
@@ -491,10 +495,17 @@ class ArenaClient:
 class ChannelIterator:
     """Iterator over channel contents, retaining metadata."""
 
-    def __init__(self, client: ArenaClient, ref: ChannelRef, per: int = 100):
+    def __init__(
+        self,
+        client: ArenaClient,
+        ref: ChannelRef,
+        per: int = 100,
+        sort: str = "position_desc",
+    ):
         self.client = client
         self.ref = ref
         self.per = per
+        self.sort = sort
         self.meta: Optional[Dict[str, Any]] = None
         self._page = 1
 
@@ -506,11 +517,11 @@ class ChannelIterator:
                         self.ref.slug, 1, 1
                     )
                 data = self.client.fetch_channel_contents_by_id(
-                    self.ref.slug, self._page, self.per
+                    self.ref.slug, self._page, self.per, self.sort
                 )
             else:
                 data = self.client.fetch_channel_contents_by_id(
-                    self.ref.channel_id, self._page, self.per
+                    self.ref.channel_id, self._page, self.per, self.sort
                 )
                 if self.meta is None:
                     meta = self.client.fetch_channel_meta_by_id(self.ref.channel_id)

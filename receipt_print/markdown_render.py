@@ -464,55 +464,65 @@ class MarkdownToken:
 
 
 def parse_inline_formatting(text: str) -> Tuple[str, List[StyledSpan]]:
-    spans = []
-    result = text
+    escaped: List[str] = []
 
+    def protect(match: re.Match[str]) -> str:
+        escaped.append(match.group(1))
+        return chr(0xE000 + len(escaped) - 1)
+
+    text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!>])", protect, text)
     patterns = [
-        (r"\*\*\*(.+?)\*\*\*", "bold_italic"),
-        (r"___(.+?)___", "bold_italic"),
-        (r"\*\*(.+?)\*\*", "bold"),
-        (r"__(.+?)__", "bold"),
-        (r"\*(.+?)\*", "italic"),
-        (r"_(.+?)_", "italic"),
-        (r"~~(.+?)~~", "strikethrough"),
-        (r"`(.+?)`", "code"),
-        (r"\[([^\]]+)\]\([^)]+\)", "link"),
+        (re.compile(r"\*\*\*(.+?)\*\*\*"), "bold_italic"),
+        (re.compile(r"(?<!\w)___(?!_)(.+?)(?<!_)___(?!\w)"), "bold_italic"),
+        (re.compile(r"\*\*(.+?)\*\*"), "bold"),
+        (re.compile(r"(?<!\w)__(?!_)(.+?)(?<!_)__(?!\w)"), "bold"),
+        (re.compile(r"\*(.+?)\*"), "italic"),
+        (re.compile(r"(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)"), "italic"),
+        (re.compile(r"~~(.+?)~~"), "strikethrough"),
+        (re.compile(r"`(.+?)`"), "code"),
+        (re.compile(r"\[([^\]]+)\]\([^)]+\)"), "link"),
     ]
+    spans: List[StyledSpan] = []
+    parts: List[str] = []
+    cursor = 0
+    output_length = 0
 
-    for pattern, style_type in patterns:
-        offset = 0
-        for match in re.finditer(pattern, text):
-            inner = match.group(1)
-            start_in_original = match.start()
-            end_in_original = match.end()
-            marker_len = len(match.group(0)) - len(inner)
+    while cursor < len(text):
+        candidates = [
+            (match.start(), priority, match, style_type)
+            for priority, (pattern, style_type) in enumerate(patterns)
+            if (match := pattern.search(text, cursor)) is not None
+        ]
+        if not candidates:
+            parts.append(text[cursor:])
+            break
+        _, _, match, style_type = min(candidates, key=lambda item: (item[0], item[1]))
+        plain = text[cursor : match.start()]
+        inner = match.group(1)
+        parts.extend((plain, inner))
+        output_length += len(plain)
+        span = StyledSpan(start=output_length, end=output_length + len(inner))
+        if style_type == "bold":
+            span.bold = True
+        elif style_type == "italic":
+            span.italic = True
+        elif style_type == "bold_italic":
+            span.bold = True
+            span.italic = True
+        elif style_type == "strikethrough":
+            span.strikethrough = True
+        elif style_type == "code":
+            span.code = True
+        elif style_type == "link":
+            span.underline = True
+        spans.append(span)
+        output_length += len(inner)
+        cursor = match.end()
 
-            result_before = result[:start_in_original - offset]
-            result_after = result[end_in_original - offset:]
-            result = result_before + inner + result_after
-
-            span = StyledSpan(
-                start=start_in_original - offset,
-                end=start_in_original - offset + len(inner),
-            )
-            if style_type == "bold":
-                span.bold = True
-            elif style_type == "italic":
-                span.italic = True
-            elif style_type == "bold_italic":
-                span.bold = True
-                span.italic = True
-            elif style_type == "strikethrough":
-                span.strikethrough = True
-            elif style_type == "code":
-                span.code = True
-            elif style_type == "link":
-                span.underline = True
-
-            spans.append(span)
-            offset += marker_len
-
-    return result, spans
+    unescaped = {
+        ord(chr(0xE000 + index)): value for index, value in enumerate(escaped)
+    }
+    return "".join(parts).translate(unescaped), spans
 
 
 def parse_task_marker(content: str) -> Tuple[Optional[str], str]:
@@ -532,7 +542,11 @@ def parse_task_marker(content: str) -> Tuple[Optional[str], str]:
     return None, content
 
 
-def parse_markdown(text: str) -> List[MarkdownToken]:
+def parse_markdown(
+    text: str,
+    *,
+    preserve_line_breaks: bool = False,
+) -> List[MarkdownToken]:
     tokens = []
     lines = text.split("\n")
     i = 0
@@ -567,10 +581,23 @@ def parse_markdown(text: str) -> List[MarkdownToken]:
 
         if re.match(r"^>\s*", line):
             quote_lines = []
-            while i < len(lines) and (lines[i].startswith(">") or (lines[i].strip() and quote_lines)):
-                quote_lines.append(re.sub(r"^>\s*", "", lines[i]))
+            while i < len(lines) and lines[i].startswith(">"):
+                quote_lines.append(re.sub(r"^>\s?", "", lines[i], count=1))
                 i += 1
-            content, spans = parse_inline_formatting(" ".join(quote_lines))
+            paragraphs = []
+            paragraph = []
+            for quote_line in quote_lines:
+                cleaned_line = quote_line.strip()
+                if cleaned_line:
+                    paragraph.append(cleaned_line)
+                elif paragraph:
+                    separator = "\n" if preserve_line_breaks else " "
+                    paragraphs.append(separator.join(paragraph))
+                    paragraph = []
+            if paragraph:
+                separator = "\n" if preserve_line_breaks else " "
+                paragraphs.append(separator.join(paragraph))
+            content, spans = parse_inline_formatting("\n\n".join(paragraphs))
             tokens.append(MarkdownToken(type="blockquote", content=content, spans=spans))
             continue
 
@@ -660,7 +687,8 @@ def parse_markdown(text: str) -> List[MarkdownToken]:
             ]):
                 para_lines.append(lines[i])
                 i += 1
-            content, spans = parse_inline_formatting(" ".join(para_lines))
+            separator = "\n" if preserve_line_breaks else " "
+            content, spans = parse_inline_formatting(separator.join(para_lines))
             tokens.append(MarkdownToken(type="paragraph", content=content, spans=spans))
             continue
 
