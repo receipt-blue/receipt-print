@@ -101,8 +101,10 @@ sheet. The `paired` and `column` layouts use one physical QR size and begin
 with the channel QR beside `owner / channel`. In `column`, each title, image,
 and text-block body remains full width; description and metadata wrap beside
 the block destinations, then return to full width below them.
-`minimal` preserves the QR-free receipt by default. Set `RECEIPT_CORE_URL` or pass `--core-url` when
-receipt-core is not at `http://127.0.0.1:3080`.
+`minimal` preserves the QR-free receipt by default. Rendering is local: the
+CLI finds the bundled `receipt-core-renderer` executable, the Nix-provided
+`receipt-core`, or `RECEIPT_CORE_BIN`. Use `--core-url` only when editions,
+queueing, or remote device transport require a running receipt-substrate.
 
 Print an Are.na channel through receipt-core. `column` is the default, omitting
 `--max-blocks` prints the entire channel, and blocks retain Are.na's visible
@@ -138,6 +140,10 @@ receipt-print are.na channel --layout minimal --channel-qr https://www.are.na/ex
 receipt-print are.na channel --no-media https://www.are.na/example/channel
 receipt-print are.na channel --no-cut https://www.are.na/example/channel
 receipt-print are.na channel --layout escpos https://www.are.na/example/channel
+
+# Select a local renderer explicitly, or opt into a remote substrate
+receipt-print are.na channel --core-bin /path/to/receipt-core https://www.are.na/example/channel
+receipt-print are.na channel --core-url http://127.0.0.1:3080 https://www.are.na/example/channel
 ```
 
 With `--sort random --max-blocks N`, random selection only takes effect when
@@ -183,3 +189,5 @@ Configure using environment variables ([see python-escpos documentation](https:/
 - `RP_NO_CUT`: Set to `1` to disable automatic cutting
 - `RP_PRINT_MODE`: `direct` (default) or `service`
 - `RP_SERVICE_URL`: Address used in service mode (default: http://127.0.0.1:9100)
+- `RECEIPT_CORE_BIN`: Local `receipt-core` executable used by Are.na layouts
+- `RECEIPT_CORE_URL`: Remote receipt-substrate URL; setting it opts out of local rendering
