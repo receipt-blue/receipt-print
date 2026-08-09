@@ -18,6 +18,7 @@ from receipt_print.arena import (
 )
 from receipt_print.arena_evaluate import fetch_channel_snapshot
 from receipt_print.arena_document import expected_qr_payloads, normalize_channel
+from receipt_print.receipt_core import SubmissionResult
 
 
 TOKEN_IDENTITY = "arena-user:active"
@@ -57,6 +58,7 @@ def test_arena_channel_exposes_max_blocks_alias():
     assert "--layout [paired|column|minimal|escpos]" in result.output
     assert "--channel-qr / --no-channel-qr" in result.output
     assert "--core-url TEXT" in result.output
+    assert "--core-bin FILE" in result.output
     assert "--random-seed INTEGER" in result.output
 
 
@@ -162,12 +164,13 @@ def test_arena_channel_defaults_to_core_column_full_channel_and_full_cut(
             calls["arena_closed"] = True
 
     class Core:
-        def __init__(self, url):
+        def __init__(self, url, *, executable=None):
             calls["core_url"] = url
+            calls["core_bin"] = executable
 
-        def print_document(self, document):
+        def submit(self, document):
             calls["document"] = document
-            return {"editionId": "01TESTEDITION"}
+            return SubmissionResult(b"escpos", None, {})
 
         def close(self):
             calls["core_closed"] = True
@@ -184,6 +187,11 @@ def test_arena_channel_defaults_to_core_column_full_channel_and_full_cut(
     monkeypatch.setattr(cli_module, "ReceiptCoreClient", Core)
     monkeypatch.setattr(cli_module, "fetch_channel_snapshot", fetch)
     monkeypatch.setattr(cli_module, "collect_media", media)
+    monkeypatch.setattr(
+        cli_module,
+        "print_raw_bytes",
+        lambda data, *, cut: calls.setdefault("prints", []).append((data, cut)),
+    )
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -198,10 +206,13 @@ def test_arena_channel_defaults_to_core_column_full_channel_and_full_cut(
         None,
     )
     assert calls["media"] == "core-channel"
+    assert calls["core_url"] is None
+    assert calls["core_bin"] is None
+    assert calls["prints"] == [(b"escpos", False)]
     assert calls["document"]["realization"]["params"]["layout"] == "column"
     assert calls["document"]["realization"]["params"]["channelQr"] is True
     assert calls["document"]["blocks"][-1] == {"type": "cut", "kind": "full"}
-    assert "as edition 01TESTEDITION" in result.output
+    assert "as edition" not in result.output
 
 
 def test_arena_channel_core_exposes_limit_media_and_channel_qr_controls(
@@ -231,12 +242,12 @@ def test_arena_channel_core_exposes_limit_media_and_channel_qr_controls(
             pass
 
     class Core:
-        def __init__(self, url):
+        def __init__(self, url, *, executable=None):
             pass
 
-        def print_document(self, document):
+        def submit(self, document):
             calls["document"] = document
-            return {}
+            return SubmissionResult(None, None, {})
 
         def close(self):
             pass
@@ -295,13 +306,13 @@ def test_arena_channel_core_exposes_seeded_random_selection(monkeypatch):
             pass
 
     class Core:
-        def __init__(self, url):
+        def __init__(self, url, *, executable=None):
             pass
 
-        def print_document(self, document):
+        def submit(self, document):
             calls["document"] = document
             calls["selection"] = document["realization"]["params"]["selection"]
-            return {}
+            return SubmissionResult(None, None, {})
 
         def close(self):
             pass

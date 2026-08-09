@@ -1639,13 +1639,14 @@ def _print_arena_channel_via_core(
     random_seed: Optional[int],
     channel_qr: Optional[bool],
     core_url: Optional[str],
+    core_bin: Optional[str],
     include_media: bool,
     no_cache: bool,
     no_cut: bool,
     partial_cut: bool,
 ) -> None:
     arena_client = ArenaClient(cache_enabled=not no_cache)
-    core_client = ReceiptCoreClient(core_url)
+    core_client = ReceiptCoreClient(core_url, executable=core_bin)
     selection = "random" if sort == "random" else "top" if limit else "full"
     try:
         channel, _ = fetch_channel_snapshot(
@@ -1665,15 +1666,16 @@ def _print_arena_channel_via_core(
             selection=selection,
             cut=cut,
         )
-        result = core_client.print_document(document)
+        result = core_client.submit(document)
+        if result.bytes is not None:
+            print_raw_bytes(result.bytes, cut=False)
     except (ArenaError, ReceiptCoreError, OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         arena_client.close()
         core_client.close()
 
-    edition = result.get("editionId")
-    suffix = f" as edition {edition}" if edition else ""
+    suffix = f" as edition {result.edition_id}" if result.edition_id else ""
     click.echo(
         f"Printed {len(channel.blocks)} block(s) from {channel.canonical_url} "
         f"with the {layout} layout{suffix}."
@@ -2121,7 +2123,14 @@ def arena_block(
 )
 @click.option(
     "--core-url",
-    help="Receipt-core substrate URL. Defaults to RECEIPT_CORE_URL or localhost:3080.",
+    help="Use the remote receipt-substrate at this URL instead of the local receipt-core executable.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
+)
+@click.option(
+    "--core-bin",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Use this local receipt-core executable.",
     cls=GroupedOption,
     group=NETWORK_GROUP,
 )
@@ -2180,6 +2189,7 @@ def arena_channel(
     sort,
     random_seed,
     core_url,
+    core_bin,
     include_media,
     no_cache,
     wrap,
@@ -2211,6 +2221,7 @@ def arena_channel(
             random_seed=random_seed,
             channel_qr=True if qr else channel_qr,
             core_url=core_url,
+            core_bin=str(core_bin) if core_bin else None,
             include_media=include_media,
             no_cache=no_cache,
             no_cut=effective_no_cut,
@@ -2221,6 +2232,8 @@ def arena_channel(
     escpos_conflicts = []
     if option_supplied_on_command_line(ctx, "core_url"):
         escpos_conflicts.append("--core-url")
+    if option_supplied_on_command_line(ctx, "core_bin"):
+        escpos_conflicts.append("--core-bin")
     if option_supplied_on_command_line(ctx, "include_media"):
         escpos_conflicts.append("--media/--no-media")
     if escpos_conflicts:
@@ -2502,7 +2515,14 @@ def arena_channel(
 )
 @click.option(
     "--core-url",
-    help="Receipt-core substrate URL. Defaults to RECEIPT_CORE_URL or localhost:3080.",
+    help="Use the remote receipt-substrate at this URL instead of the local receipt-core executable.",
+    cls=GroupedOption,
+    group=NETWORK_GROUP,
+)
+@click.option(
+    "--core-bin",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Use this local receipt-core executable.",
     cls=GroupedOption,
     group=NETWORK_GROUP,
 )
@@ -2531,6 +2551,7 @@ def arena_evaluate(
     channel_qr,
     output,
     core_url,
+    core_bin,
     media,
     no_cache,
 ):
@@ -2560,7 +2581,10 @@ def arena_evaluate(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     arena_client = ArenaClient(cache_enabled=not no_cache)
-    core_client = ReceiptCoreClient(core_url)
+    core_client = ReceiptCoreClient(
+        core_url,
+        executable=str(core_bin) if core_bin else None,
+    )
     rendered = []
     try:
         for channel_value in channels:
