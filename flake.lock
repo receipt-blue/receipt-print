@@ -34,10 +34,34 @@
         "type": "github"
       }
     },
+    "receipt-core": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1786257597,
+        "narHash": "sha256-Zevu3i1yzyYD+12QMY/G7LIJ39IQukNz7/of9bVYzxY=",
+        "ref": "refs/heads/main",
+        "rev": "31d5c821ad6f53c956223820defa4deffd135f56",
+        "revCount": 135,
+        "type": "git",
+        "url": "ssh://git@github.com/receipt-blue/receipt-substrate.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://git@github.com/receipt-blue/receipt-substrate.git"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "receipt-core": "receipt-core"
       }
     },
     "systems": {
