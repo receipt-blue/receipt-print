@@ -487,9 +487,8 @@ def _connect_locked_direct_printer(lock=None):
 
 
 def connect_printer():
-    """Use the local print service when ready, otherwise take a direct lease."""
+    """Connect directly unless service delivery was explicitly selected."""
     from receipt_print.routing import (
-        DeviceLock,
         ServicePrinter,
         print_mode,
         service_ready,
@@ -497,30 +496,19 @@ def connect_printer():
     )
 
     mode = print_mode()
-    url = service_url()
-    if mode != "direct" and service_ready(url):
-        return ServicePrinter(
-            profile=PRINTER_PROFILE,
-            charcode=CHARCODE,
-            speed=_resolve_speed(),
-            apply_speed=_apply_speed,
-            url=url,
-        )
-    if mode == "service":
-        raise RuntimeError(f"receipt-print service is not ready at {url}")
+    if mode == "direct":
+        return _connect_locked_direct_printer()
 
-    lock = DeviceLock()
-    lock.acquire()
-    if mode == "auto" and service_ready(url):
-        lock.release()
-        return ServicePrinter(
-            profile=PRINTER_PROFILE,
-            charcode=CHARCODE,
-            speed=_resolve_speed(),
-            apply_speed=_apply_speed,
-            url=url,
-        )
-    return _connect_locked_direct_printer(lock)
+    url = service_url()
+    if not service_ready(url):
+        raise RuntimeError(f"receipt-print service is not ready at {url}")
+    return ServicePrinter(
+        profile=PRINTER_PROFILE,
+        charcode=CHARCODE,
+        speed=_resolve_speed(),
+        apply_speed=_apply_speed,
+        url=url,
+    )
 
 
 def print_raw_bytes_direct(data: bytes, cut: bool = False) -> None:

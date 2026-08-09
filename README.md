@@ -181,3 +181,5 @@ Configure using environment variables ([see python-escpos documentation](https:/
 - `RP_CHAR_WIDTH`: Character width per line (default: 72)
 - `RP_MAX_LINES`: Maximum lines allowed without confirmation (default: 40)
 - `RP_NO_CUT`: Set to `1` to disable automatic cutting
+- `RP_PRINT_MODE`: `direct` (default) or `service`
+- `RP_SERVICE_URL`: Address used in service mode (default: http://127.0.0.1:9100)

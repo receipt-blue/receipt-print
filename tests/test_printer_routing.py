@@ -71,8 +71,8 @@ def test_line_limit_confirmation_covers_the_rest_of_the_job(monkeypatch, capsys)
     assert capsys.readouterr().out.count("without further size warnings") == 1
 
 
-def test_auto_mode_uses_service_when_ready(monkeypatch):
-    monkeypatch.setenv("RP_PRINT_MODE", "auto")
+def test_service_mode_uses_service_when_ready(monkeypatch):
+    monkeypatch.setenv("RP_PRINT_MODE", "service")
     monkeypatch.setattr("receipt_print.routing.service_ready", lambda url: True)
     monkeypatch.setattr("receipt_print.routing.submit_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(printer_module, "_resolve_speed", lambda: None)
@@ -81,28 +81,28 @@ def test_auto_mode_uses_service_when_ready(monkeypatch):
     remote.close()
 
 
-def test_auto_mode_rechecks_service_while_holding_device_lease(monkeypatch):
-    FakeLock.instances.clear()
-    readiness = iter([False, True])
-    monkeypatch.setenv("RP_PRINT_MODE", "auto")
-    monkeypatch.setattr(
-        "receipt_print.routing.service_ready", lambda url: next(readiness)
-    )
-    monkeypatch.setattr("receipt_print.routing.DeviceLock", FakeLock)
-    monkeypatch.setattr("receipt_print.routing.submit_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(printer_module, "_resolve_speed", lambda: None)
-    remote = printer_module.connect_printer()
-    assert remote.__class__.__name__ == "ServicePrinter"
-    assert FakeLock.instances[0].acquired == 1
-    assert FakeLock.instances[0].released == 1
-    remote.close()
-
-
-def test_auto_mode_preserves_locked_direct_fallback(monkeypatch):
+def test_default_mode_uses_direct_printer_without_probing_service(monkeypatch):
     FakeLock.instances.clear()
     physical = FakePrinter()
-    monkeypatch.setenv("RP_PRINT_MODE", "auto")
-    monkeypatch.setattr("receipt_print.routing.service_ready", lambda url: False)
+    monkeypatch.delenv("RP_PRINT_MODE", raising=False)
+    monkeypatch.setattr(
+        "receipt_print.routing.service_ready",
+        lambda url: (_ for _ in ()).throw(AssertionError("service path probed")),
+    )
+    monkeypatch.setattr("receipt_print.routing.DeviceLock", FakeLock)
+    monkeypatch.setattr(printer_module, "connect_direct_printer", lambda: physical)
+
+    leased = printer_module.connect_printer()
+    assert FakeLock.instances[0].acquired == 1
+    leased.close()
+    assert physical.closed == 1
+    assert FakeLock.instances[0].released == 1
+
+
+def test_direct_mode_uses_locked_device(monkeypatch):
+    FakeLock.instances.clear()
+    physical = FakePrinter()
+    monkeypatch.setenv("RP_PRINT_MODE", "direct")
     monkeypatch.setattr("receipt_print.routing.DeviceLock", FakeLock)
     monkeypatch.setattr(printer_module, "connect_direct_printer", lambda: physical)
 

@@ -130,7 +130,7 @@ in
     configureClients = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Route receipt-print CLI commands through this service when it is healthy.";
+      description = "Route receipt-print CLI commands explicitly through this service.";
     };
   };
 
@@ -147,6 +147,7 @@ in
     ];
 
     environment.sessionVariables = lib.mkIf cfg.configureClients {
+      RP_PRINT_MODE = "service";
       RP_SERVICE_URL = "http://${cfg.host}:${toString cfg.port}";
       RP_DEVICE_LOCK_PATH = "/run/receipt-print/device.lock";
     };

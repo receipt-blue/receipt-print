@@ -6,6 +6,7 @@ import requests
 from receipt_print.routing import (
     DeviceLock,
     ServicePrinter,
+    print_mode,
     service_ready,
     submit_raw,
 )
@@ -20,6 +21,17 @@ class Response:
 
     def json(self):
         return self._payload
+
+
+def test_print_mode_defaults_to_direct(monkeypatch):
+    monkeypatch.delenv("RP_PRINT_MODE", raising=False)
+    assert print_mode() == "direct"
+
+
+def test_print_mode_rejects_implicit_auto_routing(monkeypatch):
+    monkeypatch.setenv("RP_PRINT_MODE", "auto")
+    with pytest.raises(RuntimeError, match="service or direct"):
+        print_mode()
 
 
 def test_service_ready_requires_ready_payload(monkeypatch):

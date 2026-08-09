@@ -55,9 +55,9 @@ def _optional_positive_float_env(name: str) -> float | None:
 
 
 def print_mode() -> str:
-    mode = os.getenv("RP_PRINT_MODE", "auto").strip().lower()
-    if mode not in {"auto", "service", "direct"}:
-        raise RuntimeError("RP_PRINT_MODE must be auto, service, or direct")
+    mode = os.getenv("RP_PRINT_MODE", "direct").strip().lower()
+    if mode not in {"service", "direct"}:
+        raise RuntimeError("RP_PRINT_MODE must be service or direct")
     return mode
 
 
