@@ -9,29 +9,6 @@ A global installation is recommended, e.g. with [uv](https://docs.astral.sh/uv/)
 uv tool install receipt-print
 ```
 
-### Linux USB permissions
-
-USB receipt printers usually need a udev rule before an unprivileged user can
-open them through libusb. For Epson printers:
-
-```bash
-sudo modprobe usblp
-sudo tee /etc/udev/rules.d/70-receipt-print.rules >/dev/null <<'EOF'
-SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04b8", MODE="0660", GROUP="lp", TAG+="uaccess"
-SUBSYSTEM=="usbmisc", KERNEL=="lp[0-9]*", ATTRS{idVendor}=="04b8", MODE="0660", GROUP="lp", TAG+="uaccess", SYMLINK+="receipt-printer"
-EOF
-sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=04b8
-sudo udevadm trigger --subsystem-match=usbmisc
-```
-
-On headless systems, or systems without logind seat access, add your user to
-the selected group and start a new login session:
-
-```bash
-sudo usermod -aG lp "$USER"
-```
-
 ## Usage
 
 Print piped text:
@@ -73,6 +50,18 @@ pbpaste | receipt-print pdf  # or paste from `wl-paste` / `xclip -selection clip
 receipt-print pdf --format text document.pdf
 ```
 
+Print an Are.na channel:
+```bash
+# entire channel
+receipt-print are.na channel https://www.are.na/example/channel
+
+# first 20 visible blocks
+receipt-print are.na channel --max-blocks 20 https://www.are.na/example/channel
+
+# five random blocks
+receipt-print are.na channel --sort random https://www.are.na/example/channel
+```
+
 Print Wi-Fi QR sheets:
 ```bash
 receipt-print wifi  # choose a stored Wi-Fi profile
@@ -80,84 +69,6 @@ receipt-print wifi --ssid "Sample Net" --password "example passphrase"
 receipt-print wifi --ssid "Sample Net" --password "example passphrase" --omit-password
 receipt-print wifi --ssid "Guest WiFi" --security nopass
 ```
-
-Preview Are.na layout variants through receipt-core without using paper:
-```bash
-receipt-print are.na evaluate \
-  --selection top \
-  --limit 5 \
-  https://www.are.na/example/channel
-
-receipt-print are.na evaluate \
-  --variant paired \
-  --variant column \
-  --output build/arena-evals/manual \
-  https://www.are.na/example/channel
-```
-
-The evaluator preserves Are.na's visible manual order, records normalized and
-raw snapshots, and writes full PNGs, semantic crops, QR reports, and a contact
-sheet. The `paired` and `column` layouts use one physical QR size and begin
-with the channel QR beside `owner / channel`. In `column`, each title, image,
-and text-block body remains full width; description and metadata wrap beside
-the block destinations, then return to full width below them.
-`minimal` preserves the QR-free receipt by default. Rendering is local: the
-CLI finds the bundled `receipt-core-renderer` executable, the Nix-provided
-`receipt-core`, or `RECEIPT_CORE_BIN`. Use `--core-url` only when editions,
-queueing, or remote device transport require a running receipt-substrate.
-
-Print an Are.na channel through receipt-core. `column` is the default, omitting
-`--max-blocks` prints the entire channel, and blocks retain Are.na's visible
-manual order:
-
-```bash
-# Entire channel, column layout, with the default channel-title QR
-receipt-print are.na channel https://www.are.na/example/channel
-
-# First 20 visible blocks
-receipt-print are.na channel --max-blocks 20 https://www.are.na/example/channel
-
-# Five random blocks by default
-receipt-print are.na channel --sort random https://www.are.na/example/channel
-
-# Random 20 blocks, kept in their original visible order on the receipt
-receipt-print are.na channel --sort random --max-blocks 20 https://www.are.na/example/channel
-
-# Reproduce the same random selection later
-receipt-print are.na channel --sort random --max-blocks 20 --random-seed 42 https://www.are.na/example/channel
-
-# Every receipt-core layout
-receipt-print are.na channel --layout column https://www.are.na/example/channel
-receipt-print are.na channel --layout paired https://www.are.na/example/channel
-receipt-print are.na channel --layout minimal https://www.are.na/example/channel
-
-# Channel QR is independently controllable in every layout
-receipt-print are.na channel --layout column --no-channel-qr https://www.are.na/example/channel
-receipt-print are.na channel --layout paired --no-channel-qr https://www.are.na/example/channel
-receipt-print are.na channel --layout minimal --channel-qr https://www.are.na/example/channel
-
-# Skip preview-image downloads, leave the receipt uncut, or use the old renderer
-receipt-print are.na channel --no-media https://www.are.na/example/channel
-receipt-print are.na channel --no-cut https://www.are.na/example/channel
-receipt-print are.na channel --layout escpos https://www.are.na/example/channel
-
-# Select a local renderer explicitly, or opt into a remote substrate
-receipt-print are.na channel --core-bin /path/to/receipt-core https://www.are.na/example/channel
-receipt-print are.na channel --core-url http://127.0.0.1:3080 https://www.are.na/example/channel
-```
-
-With `--sort random --max-blocks N`, random selection only takes effect when
-the channel contains more than `N` blocks. Smaller channels remain complete and
-keep their visible order. Pinned blocks are not forced into a random sample,
-but sampled pinned blocks print first; pinned and unpinned groups each retain
-their visible Are.na-relative order.
-
-Receipt-core layouts interpret Are.na Markdown as receipt typography: headings
-and emphasis become styled runs, links are emphasized without printing Markdown
-punctuation, and authored line breaks are retained in text content and
-descriptions. Quotes use an inset rule with paragraph spacing; lists, rules,
-code, and tables receive compact receipt forms. `--layout escpos` retains the
-original direct-printer implementation and its image-tuning options.
 
 Run command(s) and print captured output:
 ```bash
@@ -191,3 +102,27 @@ Configure using environment variables ([see python-escpos documentation](https:/
 - `RP_SERVICE_URL`: Address used in service mode (default: http://127.0.0.1:9100)
 - `RECEIPT_CORE_BIN`: Local `receipt-core` executable used by Are.na layouts
 - `RECEIPT_CORE_URL`: Remote receipt-substrate URL; setting it opts out of local rendering
+
+### Linux USB permissions
+
+USB receipt printers usually need a udev rule before an unprivileged user can
+open them through libusb. For Epson printers:
+
+```bash
+sudo modprobe usblp
+sudo tee /etc/udev/rules.d/70-receipt-print.rules >/dev/null <<'EOF'
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04b8", MODE="0660", GROUP="lp", TAG+="uaccess"
+SUBSYSTEM=="usbmisc", KERNEL=="lp[0-9]*", ATTRS{idVendor}=="04b8", MODE="0660", GROUP="lp", TAG+="uaccess", SYMLINK+="receipt-printer"
+EOF
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=04b8
+sudo udevadm trigger --subsystem-match=usbmisc
+```
+
+On headless systems, or systems without logind seat access, add your user to
+the selected group and start a new login session:
+
+```bash
+sudo usermod -aG lp "$USER"
+```
+
