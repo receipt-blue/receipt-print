@@ -204,13 +204,43 @@ def test_systemexit_in_job_does_not_kill_worker(service):
     assert service.health()["worker_alive"] is True
 
 
-def test_job_exception_reraised(service):
+def test_job_exception_reraised(service, monkeypatch):
+    monkeypatch.setattr("receipt_print.serve.printer_device_available", lambda: True)
+
     def boom():
         raise RuntimeError("printer on fire")
 
     with pytest.raises(RuntimeError, match="printer on fire"):
         service.submit(boom)
+    failed = service.health()
+    assert failed["ready"] is False
+    assert failed["status"] == "error"
+    assert failed["last_error"] == "RuntimeError: printer on fire"
+    assert failed["last_error_at"] is not None
     assert service.submit(lambda: "ok") == "ok"
+    recovered = service.health()
+    assert recovered["ready"] is True
+    assert recovered["status"] == "ready"
+    assert recovered["last_error"] is None
+    assert recovered["last_success_at"] is not None
+
+
+def test_new_device_identity_clears_delivery_error(service, monkeypatch, tmp_path):
+    device = tmp_path / "printer"
+    device.write_bytes(b"")
+    monkeypatch.setenv("RP_DEVICE", str(device))
+    monkeypatch.setattr("receipt_print.serve.printer_device_available", lambda: True)
+
+    with pytest.raises(OSError, match="stalled"):
+        service.submit(lambda: (_ for _ in ()).throw(OSError("stalled")))
+    assert service.health()["status"] == "error"
+
+    device.unlink()
+    device.write_bytes(b"")
+    recovered = service.health()
+    assert recovered["ready"] is True
+    assert recovered["status"] == "ready"
+    assert recovered["last_error"] is None
 
 
 def test_timeout_orphan_not_printed():
@@ -511,6 +541,8 @@ def test_healthz_reports_worker_alive(http_server):
     body = json.loads(data)
     assert body["worker_alive"] is True
     assert body["device_available"] is True
+    assert body["status"] == "ready"
+    assert body["last_error"] is None
     assert "queue" in body
 
 
@@ -676,10 +708,16 @@ def test_failed_job_identity_can_be_retried(tmp_path):
     retry_port = server.server_address[1]
     try:
         assert _post(retry_port, b"receipt", job_id="edition:retry")[0] == 502
+        failed_status, _, failed_data = _get(retry_port, "/healthz")
+        assert failed_status == 503
+        assert json.loads(failed_data)["status"] == "error"
         status, _, data = _post(retry_port, b"receipt", job_id="edition:retry")
         assert status == 200
         assert json.loads(data)["replayed"] is False
         assert writes == [b"receipt"]
+        recovered_status, _, recovered_data = _get(retry_port, "/healthz")
+        assert recovered_status == 200
+        assert json.loads(recovered_data)["status"] == "ready"
     finally:
         server.shutdown()
         server.server_close()

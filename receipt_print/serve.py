@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 
@@ -181,6 +182,11 @@ class PrintService:
         self._lock = threading.Lock()
         self._sentinel_enqueued = False
         self._heartbeat = 0.0
+        self._status_lock = threading.Lock()
+        self._last_error: Optional[str] = None
+        self._last_error_at: Optional[str] = None
+        self._last_success_at: Optional[str] = None
+        self._failed_device_signature: Optional[tuple[int, int, int, int]] = None
 
     def start(self) -> None:
         with self._lock:
@@ -254,12 +260,33 @@ class PrintService:
         stopping = self._stopping.is_set()
         device_path = os.getenv("RP_DEVICE")
         device_available = printer_device_available()
+        device_signature = self._device_signature(device_path)
+        with self._status_lock:
+            if (
+                self._last_error is not None
+                and device_available
+                and device_signature is not None
+                and device_signature != self._failed_device_signature
+            ):
+                self._clear_error()
+            last_error = self._last_error
+            last_error_at = self._last_error_at
+            last_success_at = self._last_success_at
         live = worker_alive and not stopping
-        ready = live and device_available
+        ready = live and device_available and last_error is None
+        if not live:
+            status = "stopping" if stopping else "unavailable"
+        elif not device_available:
+            status = "unavailable"
+        elif last_error is not None:
+            status = "error"
+        else:
+            status = "ready"
         return {
             "ok": ready,
             "live": live,
             "ready": ready,
+            "status": status,
             "worker_alive": worker_alive,
             "queue": self._queue.qsize(),
             "heartbeat_age": (time.monotonic() - self._heartbeat)
@@ -267,8 +294,38 @@ class PrintService:
             else None,
             "device_path": device_path,
             "device_available": device_available,
+            "profile": os.getenv("RP_PROFILE"),
+            "last_error": last_error,
+            "last_error_at": last_error_at,
+            "last_success_at": last_success_at,
             "stopping": stopping,
         }
+
+    @staticmethod
+    def _device_signature(path: Optional[str]) -> Optional[tuple[int, int, int, int]]:
+        if not path:
+            return None
+        try:
+            device = os.stat(path)
+        except OSError:
+            return None
+        return (device.st_dev, device.st_ino, device.st_rdev, device.st_ctime_ns)
+
+    def _clear_error(self) -> None:
+        self._last_error = None
+        self._last_error_at = None
+        self._failed_device_signature = None
+
+    def _record_success(self) -> None:
+        with self._status_lock:
+            self._clear_error()
+            self._last_success_at = datetime.now(timezone.utc).isoformat()
+
+    def _record_failure(self, error: BaseException) -> None:
+        with self._status_lock:
+            self._last_error = f"{type(error).__name__}: {error}"
+            self._last_error_at = datetime.now(timezone.utc).isoformat()
+            self._failed_device_signature = self._device_signature(os.getenv("RP_DEVICE"))
 
     def _cancel_queued_jobs(self) -> None:
         while True:
@@ -313,8 +370,10 @@ class PrintService:
                 job.started = True
             try:
                 job.result = job.fn()
+                self._record_success()
             except BaseException as exc:
                 job.error = exc
+                self._record_failure(exc)
             finally:
                 job.done.set()
                 self._queue.task_done()
